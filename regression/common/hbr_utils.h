@@ -29,15 +29,15 @@
 #define HBR_ADAPTIVE
 #endif
 
-#include <hbr/mesh.h>
-#include <hbr/bilinear.h>
-#include <hbr/loop.h>
-#include <hbr/catmark.h>
-#include <hbr/vertexEdit.h>
-#include <hbr/cornerEdit.h>
-#include <hbr/holeEdit.h>
+#include "shape_utils.h"
 
-#include "../../regression/common/shape_utils.h"
+#include <opensubdiv/hbr/mesh.h>
+#include <opensubdiv/hbr/bilinear.h>
+#include <opensubdiv/hbr/loop.h>
+#include <opensubdiv/hbr/catmark.h>
+#include <opensubdiv/hbr/vertexEdit.h>
+#include <opensubdiv/hbr/cornerEdit.h>
+#include <opensubdiv/hbr/holeEdit.h>
 
 #include <sstream>
 
@@ -113,7 +113,7 @@ void applyTags( OpenSubdiv::HbrMesh<T> * mesh, Shape const * sh ) {
             OpenSubdiv::HbrCatmarkSubdivision<T> * scheme =
                 dynamic_cast<OpenSubdiv::HbrCatmarkSubdivision<T> *>( mesh->GetSubdivision() );
 
-            if (not scheme) {
+            if (! scheme) {
                 printf("the \"smoothtriangles\" tag can only be applied to Catmark meshes\n");
                 continue;
             }
@@ -152,7 +152,7 @@ void applyTags( OpenSubdiv::HbrMesh<T> * mesh, Shape const * sh ) {
             else
                 printf("the \"creasemethod\" tag only accepts \"normal\" or \"chaikin\" as value (%s)\n", t->stringargs[0].c_str());
 
-        } else if (t->name=="vertexedit" or t->name=="edgeedit") {
+        } else if (t->name=="vertexedit" || t->name=="edgeedit") {
             int nops = 0;
             int floatstride = 0;
             int maxfloatwidth = 0;
@@ -468,7 +468,7 @@ createTopology( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh, Scheme scheme) 
 
         int nv = sh->nvertsPerFace[f];
 
-        if ((scheme==kLoop) and (nv!=3)) {
+        if ((scheme==kLoop) && (nv!=3)) {
             printf("Trying to create a Loop subd with non-triangle face\n");
             exit(1);
         }
@@ -512,7 +512,7 @@ createTopology( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh, Scheme scheme) 
 
             face->SetPtexIndex(ptxidx);
 
-            if ( (scheme==kCatmark or scheme==kBilinear) and nv != 4 ) {
+            if ( (scheme==kCatmark || scheme==kBilinear) && nv != 4 ) {
                 ptxidx+=nv;
             } else {
                 ptxidx++;
@@ -549,7 +549,7 @@ createTopology( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh, Scheme scheme) 
 template <class T> void
 createFaceVaryingUV( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh) {
 
-    if (not sh->HasUV())
+    if (! sh->HasUV())
         return;
 
     for (int i=0, idx=0; i<sh->GetNumFaces(); ++i ) {
@@ -566,9 +566,9 @@ createFaceVaryingUV( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh) {
 
             float const * fvdata = &sh->uvs[ sh->faceuvs[idx++]*2 ];
 
-            if (not fvt.IsInitialized()) {
+            if (! fvt.IsInitialized()) {
                 fvt.SetAllData(2, fvdata);
-            } else if (not fvt.CompareAll(2, fvdata)) {
+            } else if (! fvt.CompareAll(2, fvdata)) {
                 OpenSubdiv::HbrFVarData<T> & nfvt = e->GetOrgVertex()->NewFVarData(f);
                 nfvt.SetAllData(2, fvdata);
             }
@@ -578,51 +578,140 @@ createFaceVaryingUV( Shape const * sh, OpenSubdiv::HbrMesh<T> * mesh) {
 
 //------------------------------------------------------------------------------
 template <class T> OpenSubdiv::HbrMesh<T> *
-simpleHbr(char const * Shapestr, Scheme scheme, std::vector<float> * verts=0, bool fvar=false) {
+simpleHbr(Shape const * sh, std::vector<float> * verts=0, bool fvar=false) {
 
-    Shape * sh = Shape::parseObj( Shapestr, scheme );
+    int fvarwidth = fvar && sh->HasUV() ? 2 : 0;
 
-    int fvarwidth = fvar and sh->HasUV() ? 2 : 0;
-
-    OpenSubdiv::HbrMesh<T> * mesh = createMesh<T>(scheme, fvarwidth);
+    OpenSubdiv::HbrMesh<T> * mesh = createMesh<T>(sh->scheme, fvarwidth);
 
     createVerticesWithPositions<T>(sh, mesh);
 
-    createTopology<T>(sh, mesh, scheme);
+    createTopology<T>(sh, mesh, sh->scheme);
 
     if (fvar)
         createFaceVaryingUV<T>(sh, mesh);
 
     if (verts)
-        copyVertexPositions<T>(sh,mesh,*verts);
+        copyVertexPositions<T>(sh, mesh, *verts);
+
+    return mesh;
+}
+
+template <class T> OpenSubdiv::HbrMesh<T> *
+simpleHbr(char const * Shapestr, Scheme scheme, std::vector<float> * verts=0, bool fvar=false) {
+
+    Shape const * sh = Shape::parseObj( Shapestr, scheme );
+
+    OpenSubdiv::HbrMesh<T> * mesh = simpleHbr<T>(sh, verts, fvar);
 
     delete sh;
-
     return mesh;
 }
 
 //------------------------------------------------------------------------------
 template <class T> OpenSubdiv::HbrMesh<T> *
-simpleHbr(char const * Shapestr, Scheme scheme, std::vector<float> & verts, bool fvar=false) {
+simpleHbr(Shape const * sh, std::vector<float> & verts, bool fvar=false) {
 
-    Shape * sh = Shape::parseObj( Shapestr, scheme );
+    int fvarwidth = fvar && sh->HasUV() ? 2 : 0;
 
-    int fvarwidth = fvar and sh->HasUV() ? 2 : 0;
-
-    OpenSubdiv::HbrMesh<T> * mesh = createMesh<T>(scheme, fvarwidth);
+    OpenSubdiv::HbrMesh<T> * mesh = createMesh<T>(sh->scheme, fvarwidth);
 
     createVertices<T>(sh, mesh);
 
-    createTopology<T>(sh, mesh, scheme);
+    createTopology<T>(sh, mesh, sh->scheme);
 
     if (fvar)
         createFaceVaryingUV<T>(sh, mesh);
 
-    copyVertexPositions<T>(sh,mesh,verts);
-
-    delete sh;
+    copyVertexPositions<T>(sh, mesh, verts);
 
     return mesh;
 }
+
+template <class T> OpenSubdiv::HbrMesh<T> *
+simpleHbr(char const * Shapestr, Scheme scheme, std::vector<float> & verts, bool fvar=false) {
+
+    Shape const * sh = Shape::parseObj( Shapestr, scheme );
+
+    OpenSubdiv::HbrMesh<T> *mesh = simpleHbr<T>(sh, verts, fvar);
+
+    delete sh;
+    return mesh;
+}
+
+//------------------------------------------------------------------------------
+template <class T>
+OpenSubdiv::HbrMesh<T> *
+interpolateHbrVertexData(Shape const * sh, int maxlevel) {
+
+    // Hbr interpolation
+    OpenSubdiv::HbrMesh<T> *hmesh = simpleHbr<T>(sh, /* verts vector */ 0, /* fvar */ false);
+    assert(hmesh);
+
+    for (int level=0, firstface=0; level<maxlevel; ++level ) {
+        int nfaces = hmesh->GetNumFaces();
+        for (int i=firstface; i<nfaces; ++i) {
+
+            OpenSubdiv::HbrFace<T> * f = hmesh->GetFace(i);
+            assert(f->GetDepth()==level);
+            if (! f->IsHole()) {
+                f->Refine();
+            }
+        }
+        // Hbr allocates faces sequentially, skip faces that have already been
+        // refined.
+        firstface = nfaces;
+    }
+    return hmesh;
+}
+
+template <class T>
+OpenSubdiv::HbrMesh<T> *
+interpolateHbrVertexData(char const * Shapestr, Scheme scheme, int maxlevel) {
+
+    Shape const * sh = Shape::parseObj( Shapestr, scheme );
+
+    OpenSubdiv::HbrMesh<T> *mesh = interpolateHbrVertexData<T>(sh, maxlevel);
+
+    delete sh;
+    return mesh;
+}
+
+//------------------------------------------------------------------------------
+// Returns true if a vertex or any of its parents is on a boundary
+template <class T>
+bool
+hbrVertexOnBoundary(const OpenSubdiv::HbrVertex<T> *v)
+{
+    if (! v)
+        return false;
+
+    if (v->OnBoundary())
+        return true;
+
+    OpenSubdiv::HbrVertex<T> const * pv = v->GetParentVertex();
+    if (pv)
+        return hbrVertexOnBoundary(pv);
+    else {
+        OpenSubdiv::HbrHalfedge<T> const * pe = v->GetParentEdge();
+        if (pe) {
+              return hbrVertexOnBoundary(pe->GetOrgVertex()) ||
+                     hbrVertexOnBoundary(pe->GetDestVertex());
+        } else {
+            OpenSubdiv::HbrFace<T> const * pf = v->GetParentFace(), * rootf = pf;
+            while (pf) {
+                pf = pf->GetParent();
+                if (pf)
+                    rootf=pf;
+            }
+            if (rootf)
+                for (int i=0; i<rootf->GetNumVertices(); ++i)
+                    if (rootf->GetVertex(i)->OnBoundary())
+                        return true;
+        }
+    }
+    return false;
+}
+
 
 #endif /* HBR_UTILS_H */

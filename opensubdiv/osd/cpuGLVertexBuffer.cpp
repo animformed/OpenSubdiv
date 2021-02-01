@@ -22,11 +22,12 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
+#include "glLoader.h"
+
 #include "../osd/cpuGLVertexBuffer.h"
 
-#include "../osd/opengl.h"
-
 #include <string.h>
+
 
 namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
@@ -36,19 +37,22 @@ namespace Osd {
 CpuGLVertexBuffer::CpuGLVertexBuffer(int numElements, int numVertices)
     : _numElements(numElements), _numVertices(numVertices),
       _vbo(0), _cpuBuffer(0), _dataDirty(true) {
+
+    // Initialize internal OpenGL loader library if necessary
+    OpenSubdiv::internal::GLLoader::libraryInitializeGL();
 }
 
 CpuGLVertexBuffer::~CpuGLVertexBuffer() {
 
     delete[] _cpuBuffer;
-    
+
     if (_vbo) {
         glDeleteBuffers(1, &_vbo);
     }
 }
 
 CpuGLVertexBuffer *
-CpuGLVertexBuffer::Create(int numElements, int numVertices) {
+CpuGLVertexBuffer::Create(int numElements, int numVertices, void *) {
     CpuGLVertexBuffer *instance =
         new CpuGLVertexBuffer(numElements, numVertices);
     if (instance->allocate()) return instance;
@@ -57,9 +61,12 @@ CpuGLVertexBuffer::Create(int numElements, int numVertices) {
 }
 
 void
-CpuGLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices) {
+CpuGLVertexBuffer::UpdateData(const float *src,
+                              int startVertex, int numVertices,
+                              void * /*deviceContext*/) {
 
-    memcpy(_cpuBuffer + startVertex * GetNumElements(), src, GetNumElements() * numVertices * sizeof(float));
+    memcpy(_cpuBuffer + startVertex * GetNumElements(), src,
+           GetNumElements() * numVertices * sizeof(float));
     _dataDirty = true;
 }
 
@@ -83,14 +90,14 @@ CpuGLVertexBuffer::BindCpuBuffer() {
 }
 
 GLuint
-CpuGLVertexBuffer::BindVBO() {
+CpuGLVertexBuffer::BindVBO(void * /*deviceContext*/) {
 
-    if (not _dataDirty)
+    if (! _dataDirty)
         return _vbo;
 
     int size = GetNumElements() * GetNumVertices() * sizeof(float);
 
-    if (not _vbo) {
+    if (! _vbo) {
         glGenBuffers(1, &_vbo);
     }
 

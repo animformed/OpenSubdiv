@@ -30,22 +30,28 @@ set(SOURCE_FILES
      fvarLevel.cpp
      fvarRefinement.cpp
      level.cpp
+     quadRefinement.cpp
      refinement.cpp
      sparseSelector.cpp
+     triRefinement.cpp
+)
+
+set(PRIVATE_HEADER_FILES
+     quadRefinement.h
+     triRefinement.h
 )
 
 set(PUBLIC_HEADER_FILES
      array.h
+     componentInterfaces.h
      fvarLevel.h
      fvarRefinement.h
      level.h
-     maskInterfaces.h
      refinement.h
      sparseSelector.h
+     stackBuffer.h
      types.h
 )
-
-set(PRIVATE_HEADER_FILES )
 
 set(DOXY_HEADER_FILES ${PUBLIC_HEADER_FILES})
 
@@ -61,10 +67,15 @@ if (NOT NO_LIB)
             ${PUBLIC_HEADER_FILES}
     )
 
+    set_target_properties(vtr_obj
+        PROPERTIES
+            FOLDER "opensubdiv"
+    )
+
 endif()
 
 #-------------------------------------------------------------------------------
-_add_doxy_headers( "${DOXY_HEADER_FILES}" )
+osd_add_doxy_headers( "${DOXY_HEADER_FILES}" )
 
 install(
     FILES

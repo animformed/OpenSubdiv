@@ -22,12 +22,12 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#ifndef OSD_OPENGL_H
-#define OSD_OPENGL_H
+#ifndef OPENSUBDIV3_OSD_OPENGL_H
+#define OPENSUBDIV3_OSD_OPENGL_H
 
 #if defined(__APPLE__)
     #include "TargetConditionals.h"
-    #if TARGET_OS_IPHONE or TARGET_IPHONE_SIMULATOR
+    #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
         #include <OpenGLES/ES2/gl.h>
     #else
         #if defined(OSD_USES_GLEW)
@@ -40,7 +40,7 @@
     #include <GLES2/gl2.h>
 #else
     #if defined(_WIN32)
-        #define W32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
         #include <windows.h>
     #endif
     #if defined(OSD_USES_GLEW)
@@ -50,4 +50,4 @@
     #endif
 #endif
 
-#endif  // OSD_OPENGL_H
+#endif  // OPENSUBDIV3_OSD_OPENGL_H

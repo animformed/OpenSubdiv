@@ -22,43 +22,74 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#if defined(__APPLE__)
-    #if defined(OSD_USES_GLEW)
-        #include <GL/glew.h>
-    #else
-        #include <OpenGL/gl3.h>
-    #endif
-    #define GLFW_INCLUDE_GL3
-    #define GLFW_NO_GLU
-#else
-    #include <stdlib.h>
-    #include <GL/glew.h>
-    #if defined(WIN32)
-        #include <GL/wglew.h>
-    #endif
-#endif
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window=0;
 GLFWmonitor* g_primary=0;
 
-#include <osd/cpuComputeContext.h>
-#include <osd/cpuComputeController.h>
-#include <osd/cpuEvalLimitContext.h>
-#include <osd/cpuEvalLimitController.h>
-#include <osd/cpuVertexBuffer.h>
-#include <osd/cpuGLVertexBuffer.h>
-#include <osd/error.h>
-#include <osd/drawContext.h>
-#include <osd/mesh.h>
-#include <osd/vertex.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
+#include <opensubdiv/osd/cpuVertexBuffer.h>
+#include <opensubdiv/osd/cpuPatchTable.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/osd/mesh.h>
 
-#include <common/vtr_utils.h>
+#ifdef OPENSUBDIV_HAS_TBB
+    #include <opensubdiv/osd/tbbEvaluator.h>
+#endif
+
+#ifdef OPENSUBDIV_HAS_OPENMP
+    #include <opensubdiv/osd/ompEvaluator.h>
+#endif
+
+#ifdef OPENSUBDIV_HAS_CUDA
+    #include <opensubdiv/osd/cudaEvaluator.h>
+    #include <opensubdiv/osd/cudaVertexBuffer.h>
+    #include <opensubdiv/osd/cudaGLVertexBuffer.h>
+    #include <opensubdiv/osd/cudaPatchTable.h>
+    #include "../common/cudaDeviceContext.h"
+
+    CudaDeviceContext g_cudaDeviceContext;
+#endif
+
+#ifdef OPENSUBDIV_HAS_OPENCL
+    #include <opensubdiv/osd/clVertexBuffer.h>
+    #include <opensubdiv/osd/clGLVertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
+    #include <opensubdiv/osd/clPatchTable.h>
+    #include "../common/clDeviceContext.h"
+    CLDeviceContext g_clDeviceContext;
+#endif
+
+#ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
+    #include <opensubdiv/osd/glXFBEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glPatchTable.h>
+#endif
+
+#ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
+    #include <opensubdiv/osd/glComputeEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glPatchTable.h>
+#endif
+
+#include <opensubdiv/far/topologyRefiner.h>
+#include <opensubdiv/far/stencilTableFactory.h>
+#include <opensubdiv/far/patchTableFactory.h>
+
+#include <opensubdiv/far/error.h>
+
+#include "../../regression/common/far_utils.h"
+#include "../../regression/common/arg_utils.h"
+#include "../common/viewerArgsUtils.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
-#include "../common/gl_hud.h"
+#include "../common/glControlMeshDisplay.h"
+#include "../common/glHud.h"
+#include "../common/glUtils.h"
 
 #include "init_shapes.h"
+#include "particles.h"
 
 #include <cfloat>
 #include <vector>
@@ -67,35 +98,57 @@ GLFWmonitor* g_primary=0;
 #include <sstream>
 #include <stdlib.h>
 
-#ifdef OPENSUBDIV_HAS_OPENMP
-    #include <omp.h>
-#endif
-
 using namespace OpenSubdiv;
 
 //------------------------------------------------------------------------------
+enum KernelType { kCPU = 0,
+                  kOPENMP = 1,
+                  kTBB = 2,
+                  kCUDA = 3,
+                  kCL = 4,
+                  kGLXFB = 5,
+                  kGLCompute = 6 };
+
+enum EndCap      { kEndCapBilinearBasis,
+                   kEndCapBSplineBasis,
+                   kEndCapGregoryBasis };
+
+enum HudCheckBox { kHUD_CB_DISPLAY_CONTROL_MESH_EDGES,
+                   kHUD_CB_DISPLAY_CONTROL_MESH_VERTS,
+                   kHUD_CB_ANIMATE_VERTICES,
+                   kHUD_CB_ANIMATE_PARTICLES,
+                   kHUD_CB_RANDOM_START,
+                   kHUD_CB_FREEZE,
+                   kHUD_CB_ADAPTIVE,
+                   kHUD_CB_SMOOTH_CORNER_PATCH,
+                   kHUD_CB_SINGLE_CREASE_PATCH,
+                   kHUD_CB_INF_SHARP_PATCH };
+
+enum DrawMode { kUV,
+                kVARYING,
+                kNORMAL,
+                kSHADE,
+                kFACEVARYING,
+                kMEAN_CURVATURE };
+
 std::vector<float> g_orgPositions,
                    g_positions,
                    g_varyingColors;
 
 int g_currentShape = 0,
-    g_level = 3,
+    g_adaptive = 1,
+    g_level = 2,
+    g_kernel = kCPU,
+    g_endCap = kEndCapGregoryBasis,
+    g_smoothCornerPatch = 1,
+    g_singleCreasePatch = 0,
+    g_infSharpPatch = 1,
     g_numElements = 3;
-
-std::vector<int>   g_coarseEdges;
-std::vector<float> g_coarseEdgeSharpness;
-std::vector<float> g_coarseVertexSharpness;
-
-enum DrawMode { kUV=0,
-                kVARYING=1,
-                kFACEVARYING=2 };
 
 int   g_running = 1,
       g_width = 1024,
       g_height = 1024,
       g_fullscreen = 0,
-      g_drawCageEdges = 1,
-      g_drawCageVertices = 1,
       g_drawMode = kUV,
       g_prev_x = 0,
       g_prev_y = 0,
@@ -111,6 +164,8 @@ float g_rotate[2] = {0, 0},
       g_size = 0,
       g_moveScale = 0.0f;
 
+bool  g_yup = false;
+
 GLuint g_transformUB = 0,
        g_transformBinding = 0;
 
@@ -120,142 +175,370 @@ struct Transform {
     float ModelViewProjectionMatrix[16];
 } g_transformData;
 
+OpenSubdiv::Sdc::Options::FVarLinearInterpolation  g_fvarBoundary =
+    //OpenSubdiv::Sdc::Options::FVAR_LINEAR_ALL;
+    OpenSubdiv::Sdc::Options::FVAR_LINEAR_CORNERS_ONLY;
 
 // performance
 float g_evalTime = 0;
 float g_computeTime = 0;
+float g_prevTime = 0;
+float g_currentTime = 0;
 Stopwatch g_fpsTimer;
 
 //------------------------------------------------------------------------------
-int g_nsamples=1000,
-    g_nsamplesFound=0;
+int g_nParticles = 65536;
 
-GLuint g_cageEdgeVAO = 0,
-       g_cageEdgeVBO = 0,
-       g_cageVertexVAO = 0,
-       g_cageVertexVBO = 0,
-       g_samplesVAO=0;
+bool g_randomStart = true;//false;
+bool g_animParticles = true;
+
+GLuint g_samplesVAO=0;
 
 GLhud g_hud;
+GLControlMeshDisplay g_controlMeshDisplay;
 
 //------------------------------------------------------------------------------
-static int
-createRandomSamples( int nfaces, int nsamples, std::vector<Osd::EvalCoords> & coords ) {
-
-    coords.resize(nfaces * nsamples);
-
-    Osd::EvalCoords * coord = &coords[0];
-
-    // large Pell prime number
-    srand( static_cast<int>(2147483647) );
-
-    for (int i=0; i<nfaces; ++i) {
-        for (int j=0; j<nsamples; ++j) {
-            coord->face = i;
-            coord->u = (float)rand()/(float)RAND_MAX;
-            coord->v = (float)rand()/(float)RAND_MAX;
-            ++coord;
-        }
-    }
-
-    return (int)coords.size();
-}
+struct Program {
+    GLuint program;
+    GLuint uniformModelViewMatrix;
+    GLuint uniformProjectionMatrix;
+    GLuint uniformDrawMode;
+    GLuint attrPosition;
+    GLuint attrColor;
+    GLuint attrDu;
+    GLuint attrDv;
+    GLuint attrDuu;
+    GLuint attrDuv;
+    GLuint attrDvv;
+    GLuint attrPatchCoord;
+    GLuint attrFVarData;
+} g_defaultProgram;
 
 //------------------------------------------------------------------------------
-static int
-createRandomVaryingColors(int nverts, std::vector<float> & colors) {
-
-    colors.resize( nverts * 3 );
+static void
+createRandomColors(int nverts, int stride, float * colors) {
 
     // large Pell prime number
     srand( static_cast<int>(2147483647) );
 
     for (int i=0; i<nverts; ++i) {
-        colors[i*3+0] = (float)rand()/(float)RAND_MAX;
-        colors[i*3+1] = (float)rand()/(float)RAND_MAX;
-        colors[i*3+2] = (float)rand()/(float)RAND_MAX;
+        colors[i*stride+0] = (float)rand()/(float)RAND_MAX;
+        colors[i*stride+1] = (float)rand()/(float)RAND_MAX;
+        colors[i*stride+2] = (float)rand()/(float)RAND_MAX;
     }
-
-    return (int)colors.size();
 }
 
 //------------------------------------------------------------------------------
-static void
-createCoarseMesh(OpenSubdiv::Far::TopologyRefiner const & refiner) {
+Far::PatchTable const * g_patchTable = NULL;
 
-    typedef OpenSubdiv::Far::IndexArray IndexArray;
+// input and output vertex data
+class EvalOutputBase {
+public:
+    virtual ~EvalOutputBase() {}
+    virtual GLuint BindSourceData() const = 0;
+    virtual GLuint BindVertexData() const = 0;
+    virtual GLuint Bind1stDerivatives() const = 0;
+    virtual GLuint Bind2ndDerivatives() const = 0;
+    virtual GLuint BindFaceVaryingData() const = 0;
+    virtual GLuint BindPatchCoords() const = 0;
+    virtual void UpdateData(const float *src, int startVertex, int numVertices) = 0;
+    virtual void UpdateVaryingData(const float *src, int startVertex, int numVertices) = 0;
+    virtual void UpdateFaceVaryingData(const float *src, int startVertex, int numVertices) = 0;
+    virtual bool HasFaceVaryingData() const = 0;
+    virtual void Refine() = 0;
+    virtual void EvalPatches() = 0;
+    virtual void EvalPatchesWith1stDerivatives() = 0;
+    virtual void EvalPatchesWith2ndDerivatives() = 0;
+    virtual void EvalPatchesVarying() = 0;
+    virtual void EvalPatchesFaceVarying() = 0;
+    virtual void UpdatePatchCoords(
+        std::vector<Osd::PatchCoord> const &patchCoords) = 0;
+};
 
-    // save coarse topology (used for coarse mesh drawing)
-    int nedges = refiner.GetNumEdges(0),
-        nverts = refiner.GetNumVertices(0);
+// note: Since we don't have a class for device-patchcoord container in osd,
+// we cheat to use vertexbuffer as a patch-coord (5int) container.
+//
+// Please don't follow the pattern in your actual application.
+//
+template<typename SRC_VERTEX_BUFFER, typename EVAL_VERTEX_BUFFER,
+         typename STENCIL_TABLE, typename PATCH_TABLE, typename EVALUATOR,
+         typename DEVICE_CONTEXT = void>
+class EvalOutput : public EvalOutputBase {
+public:
+    typedef OpenSubdiv::Osd::EvaluatorCacheT<EVALUATOR> EvaluatorCache;
 
-    g_coarseEdges.resize(nedges*2);
-    g_coarseEdgeSharpness.resize(nedges);
-    g_coarseVertexSharpness.resize(nverts);
+    EvalOutput(Far::StencilTable const *vertexStencils,
+               Far::StencilTable const *varyingStencils,
+               Far::StencilTable const *faceVaryingStencils,
+               int fvarChannel, int fvarWidth,
+               int numParticles, Far::PatchTable const *patchTable,
+               EvaluatorCache *evaluatorCache = NULL,
+               DEVICE_CONTEXT *deviceContext = NULL)
+        : _srcDesc(       /*offset*/ 0, /*length*/ 3, /*stride*/ 3),
+          _srcVaryingDesc(/*offset*/ 0, /*length*/ 3, /*stride*/ 3),
+          _srcFVarDesc(   /*offset*/ 0, /*length*/ fvarWidth, /*stride*/ fvarWidth),
+          _vertexDesc(    /*offset*/ 0, /*length*/ 3, /*stride*/ 6),
+          _varyingDesc(   /*offset*/ 3, /*length*/ 3, /*stride*/ 6),
+          _fvarDesc(      /*offset*/ 0, /*length*/ fvarWidth, /*stride*/ fvarWidth),
+          _duDesc(        /*offset*/ 0, /*length*/ 3, /*stride*/ 6),
+          _dvDesc(        /*offset*/ 3, /*length*/ 3, /*stride*/ 6),
+          _duuDesc(       /*offset*/ 0, /*length*/ 3, /*stride*/ 9),
+          _duvDesc(       /*offset*/ 3, /*length*/ 3, /*stride*/ 9),
+          _dvvDesc(       /*offset*/ 6, /*length*/ 3, /*stride*/ 9),
+          _deviceContext(deviceContext) {
 
-    for(int i=0; i<nedges; ++i) {
-        IndexArray verts = refiner.GetEdgeVertices(0, i);
-        g_coarseEdges[i*2  ]=verts[0];
-        g_coarseEdges[i*2+1]=verts[1];
-        g_coarseEdgeSharpness[i]=refiner.GetEdgeSharpness(0, i);
+        // total number of vertices = coarse points + refined points + local points
+        int numTotalVerts = vertexStencils->GetNumControlVertices()
+                          + vertexStencils->GetNumStencils();
+
+        _srcData = SRC_VERTEX_BUFFER::Create(3, numTotalVerts, _deviceContext);
+        _srcVaryingData = SRC_VERTEX_BUFFER::Create(3, numTotalVerts, _deviceContext);
+        _vertexData = EVAL_VERTEX_BUFFER::Create(6, numParticles, _deviceContext);
+        _deriv1 = EVAL_VERTEX_BUFFER::Create(6, numParticles, _deviceContext);
+        _deriv2 = EVAL_VERTEX_BUFFER::Create(9, numParticles, _deviceContext);
+        _patchTable = PATCH_TABLE::Create(patchTable, _deviceContext);
+        _patchCoords = NULL;
+        _numCoarseVerts = vertexStencils->GetNumControlVertices();
+        _vertexStencils =
+            Osd::convertToCompatibleStencilTable<STENCIL_TABLE>(vertexStencils, _deviceContext);
+        _varyingStencils =
+            Osd::convertToCompatibleStencilTable<STENCIL_TABLE>(varyingStencils, _deviceContext);
+
+        if (faceVaryingStencils) {
+            _numCoarseFVarVerts = faceVaryingStencils->GetNumControlVertices();
+            int numTotalFVarVerts = faceVaryingStencils->GetNumControlVertices()
+                                  + faceVaryingStencils->GetNumStencils();
+            _srcFVarData = EVAL_VERTEX_BUFFER::Create(2, numTotalFVarVerts, _deviceContext);
+            _fvarData = EVAL_VERTEX_BUFFER::Create(fvarWidth, numParticles, _deviceContext);
+            _faceVaryingStencils =
+                Osd::convertToCompatibleStencilTable<STENCIL_TABLE>(faceVaryingStencils, _deviceContext);
+            _fvarChannel = fvarChannel;
+            _fvarWidth = fvarWidth;
+        } else {
+            _numCoarseFVarVerts = 0;
+            _srcFVarData = NULL;
+            _fvarData = NULL;
+            _faceVaryingStencils = NULL;
+            _fvarChannel = 0;
+            _fvarWidth = 0;
+        }
+        _evaluatorCache = evaluatorCache;
     }
-
-    for(int i=0; i<nverts; ++i) {
-        g_coarseVertexSharpness[i]=refiner.GetVertexSharpness(0, i);
+    ~EvalOutput() {
+        delete _srcData;
+        delete _srcVaryingData;
+        delete _srcFVarData;
+        delete _vertexData;
+        delete _deriv1;
+        delete _deriv2;
+        delete _fvarData;
+        delete _patchTable;
+        delete _patchCoords;
+        delete _vertexStencils;
+        delete _varyingStencils;
+        delete _faceVaryingStencils;
     }
-
-    // assign a randomly generated color for each vertex ofthe mesh
-    createRandomVaryingColors(nverts, g_varyingColors);
-}
-
-
-//------------------------------------------------------------------------------
-static int
-getNumPtexFaces(OpenSubdiv::Far::TopologyRefiner const & refiner) {
-
-    int result = 0;
-    for (int face=0; face<refiner.GetNumFaces(0); ++face) {
-        OpenSubdiv::Far::IndexArray fverts = refiner.GetFaceVertices(0, face);
-        result += fverts.size()==4 ? 1 : fverts.size();
+    virtual GLuint BindSourceData() const {
+        return _srcData->BindVBO();
     }
-    return result;
-}
+    virtual GLuint BindVertexData() const {
+        return _vertexData->BindVBO();
+    }
+    virtual GLuint Bind1stDerivatives() const {
+        return _deriv1->BindVBO();
+    }
+    virtual GLuint Bind2ndDerivatives() const {
+        return _deriv2->BindVBO();
+    }
+    virtual GLuint BindFaceVaryingData() const {
+        return _fvarData->BindVBO();
+    }
+    virtual GLuint BindPatchCoords() const {
+        return _patchCoords->BindVBO();
+    }
+    virtual void UpdateData(const float *src, int startVertex, int numVertices) {
+        _srcData->UpdateData(src, startVertex, numVertices, _deviceContext);
+    }
+    virtual void UpdateVaryingData(const float *src, int startVertex, int numVertices) {
+        _srcVaryingData->UpdateData(src, startVertex, numVertices, _deviceContext);
+    }
+    virtual void UpdateFaceVaryingData(const float *src, int startVertex, int numVertices) {
+        _srcFVarData->UpdateData(src, startVertex, numVertices, _deviceContext);
+    }
+    virtual bool HasFaceVaryingData() const {
+        return _faceVaryingStencils != NULL;
+    }
+    virtual void Refine() {
+        Osd::BufferDescriptor dstDesc = _srcDesc;
+        dstDesc.offset += _numCoarseVerts * _srcDesc.stride;
 
-//------------------------------------------------------------------------------
-Osd::CpuVertexBuffer * g_vertexData=0,
-                   * g_varyingData=0;
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcDesc, dstDesc, _deviceContext);
 
-Osd::CpuComputeContext * g_computeCtx = 0;
+        EVALUATOR::EvalStencils(_srcData, _srcDesc,
+                                _srcData, dstDesc,
+                                _vertexStencils,
+                                evalInstance,
+                                _deviceContext);
 
-Osd::CpuComputeController g_computeCtrl;
+        dstDesc = _srcVaryingDesc;
+        dstDesc.offset += _numCoarseVerts * _srcVaryingDesc.stride;
+        evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcVaryingDesc, dstDesc, _deviceContext);
 
-Far::KernelBatchVector  g_kernelBatches;
+        EVALUATOR::EvalStencils(_srcVaryingData, _srcVaryingDesc,
+                                _srcVaryingData, dstDesc,
+                                _varyingStencils,
+                                evalInstance,
+                                _deviceContext);
 
-Osd::CpuEvalLimitContext * g_evalCtx = 0;
+        if (HasFaceVaryingData()) {
+            Osd::BufferDescriptor dstFVarDesc = _srcFVarDesc;
+            dstFVarDesc.offset += _numCoarseFVarVerts * _srcFVarDesc.stride;
 
-Osd::CpuEvalLimitController g_evalCtrl;
+            evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+                _evaluatorCache, _srcFVarDesc, dstFVarDesc, _deviceContext);
 
-Osd::VertexBufferDescriptor g_idesc( /*offset*/ 0, /*legnth*/ 3, /*stride*/ 3 ),
-                          g_odesc( /*offset*/ 0, /*legnth*/ 3, /*stride*/ 6 ),
-                          g_vdesc( /*offset*/ 3, /*legnth*/ 3, /*stride*/ 6 ),
-                          g_fvidesc( /*offset*/ 0, /*legnth*/ 2, /*stride*/ 2 ),
-                          g_fvodesc( /*offset*/ 3, /*legnth*/ 2, /*stride*/ 6 );
+            EVALUATOR::EvalStencils(_srcFVarData, _srcFVarDesc,
+                                    _srcFVarData, dstFVarDesc,
+                                    _faceVaryingStencils,
+                                    evalInstance,
+                                    _deviceContext);
+        }
 
-std::vector<Osd::EvalCoords> g_coords;
+    }
+    virtual void EvalPatches() {
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcDesc, _vertexDesc, _deviceContext);
 
-Osd::CpuGLVertexBuffer * g_Q=0,
-                     * g_dQu=0,
-                     * g_dQv=0;
+        EVALUATOR::EvalPatches(
+            _srcData, _srcDesc,
+            _vertexData, _vertexDesc,
+            _patchCoords->GetNumVertices(),
+            _patchCoords,
+            _patchTable, evalInstance, _deviceContext);
+    }
+    virtual void EvalPatchesWith1stDerivatives() {
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcDesc, _vertexDesc, _duDesc, _dvDesc, _deviceContext);
+        EVALUATOR::EvalPatches(
+            _srcData, _srcDesc,
+            _vertexData, _vertexDesc,
+            _deriv1, _duDesc,
+            _deriv1, _dvDesc,
+            _patchCoords->GetNumVertices(),
+            _patchCoords,
+            _patchTable, evalInstance, _deviceContext);
+    }
+    virtual void EvalPatchesWith2ndDerivatives() {
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcDesc, _vertexDesc,
+            _duDesc, _dvDesc, _duuDesc, _duvDesc, _dvvDesc,
+            _deviceContext);
+        EVALUATOR::EvalPatches(
+            _srcData, _srcDesc,
+            _vertexData, _vertexDesc,
+            _deriv1, _duDesc,
+            _deriv1, _dvDesc,
+            _deriv2, _duuDesc,
+            _deriv2, _duvDesc,
+            _deriv2, _dvvDesc,
+            _patchCoords->GetNumVertices(),
+            _patchCoords,
+            _patchTable, evalInstance, _deviceContext);
+    }
+    virtual void EvalPatchesVarying() {
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcVaryingDesc, _varyingDesc, _deviceContext);
+
+        EVALUATOR::EvalPatchesVarying(
+            _srcVaryingData, _srcVaryingDesc,
+            // varying data is interleaved in vertexData.
+            _vertexData, _varyingDesc,
+            _patchCoords->GetNumVertices(),
+            _patchCoords,
+            _patchTable, evalInstance, _deviceContext);
+    }
+    virtual void EvalPatchesFaceVarying() {
+        EVALUATOR const *evalInstance = OpenSubdiv::Osd::GetEvaluator<EVALUATOR>(
+            _evaluatorCache, _srcFVarDesc, _fvarDesc, _deviceContext);
+
+        EVALUATOR::EvalPatchesFaceVarying(
+            _srcFVarData, _srcFVarDesc,
+            _fvarData, _fvarDesc,
+            _patchCoords->GetNumVertices(),
+            _patchCoords,
+            _patchTable, _fvarChannel, evalInstance, _deviceContext);
+    }
+    virtual void UpdatePatchCoords(
+        std::vector<Osd::PatchCoord> const &patchCoords) {
+        if (_patchCoords &&
+            _patchCoords->GetNumVertices() != (int)patchCoords.size()) {
+            delete _patchCoords;
+            _patchCoords = NULL;
+        }
+        if (! _patchCoords) {
+            _patchCoords = EVAL_VERTEX_BUFFER::Create(5,
+                                                      (int)patchCoords.size(),
+                                                      _deviceContext);
+        }
+        _patchCoords->UpdateData((float*)&patchCoords[0], 0, (int)patchCoords.size(), _deviceContext);
+    }
+private:
+    SRC_VERTEX_BUFFER *_srcData;
+    SRC_VERTEX_BUFFER *_srcVaryingData;
+    EVAL_VERTEX_BUFFER *_srcFVarData;
+    EVAL_VERTEX_BUFFER *_vertexData;
+    EVAL_VERTEX_BUFFER *_deriv1;
+    EVAL_VERTEX_BUFFER *_deriv2;
+    EVAL_VERTEX_BUFFER *_fvarData;
+    EVAL_VERTEX_BUFFER *_patchCoords;
+    PATCH_TABLE *_patchTable;
+    Osd::BufferDescriptor _srcDesc;
+    Osd::BufferDescriptor _srcVaryingDesc;
+    Osd::BufferDescriptor _srcFVarDesc;
+    Osd::BufferDescriptor _vertexDesc;
+    Osd::BufferDescriptor _varyingDesc;
+    Osd::BufferDescriptor _fvarDesc;
+    Osd::BufferDescriptor _duDesc;
+    Osd::BufferDescriptor _dvDesc;
+    Osd::BufferDescriptor _duuDesc;
+    Osd::BufferDescriptor _duvDesc;
+    Osd::BufferDescriptor _dvvDesc;
+    int _numCoarseVerts;
+    int _numCoarseFVarVerts;
+
+    STENCIL_TABLE const *_vertexStencils;
+    STENCIL_TABLE const *_varyingStencils;
+    STENCIL_TABLE const *_faceVaryingStencils;
+
+    int _fvarChannel;
+    int _fvarWidth;
+
+    EvaluatorCache *_evaluatorCache;
+    DEVICE_CONTEXT *_deviceContext;
+};
+
+// This example uses one shared interleaved buffer for evaluated
+// 1st derivatives and a second shared interleaved buffer for
+// evaluated 2nd derivatives. We use this specialized device
+// context to allow the XFB evaluator to take advantage of this
+// and make more efficient use of available XFB buffer bindings.
+struct XFBDeviceContext {
+    bool AreInterleavedDerivativeBuffers() const { return true; }
+} g_xfbDeviceContext;
+
+EvalOutputBase *g_evalOutput = NULL;
+STParticles * g_particles=0;
 
 //------------------------------------------------------------------------------
 static void
 updateGeom() {
-
     int nverts = (int)g_orgPositions.size() / 3;
 
     const float *p = &g_orgPositions[0];
 
-    float r = sin(g_frame*0.001f) * g_moveScale;
+    float r = sin(g_frame*0.1f) * g_moveScale;
 
     for (int i = 0; i < nverts; ++i) {
         //float move = 0.05f*cosf(p[0]*20+g_frame*0.01f);
@@ -271,9 +554,17 @@ updateGeom() {
     Stopwatch s;
     s.Start();
 
-    g_vertexData->UpdateData( &g_positions[0], 0, nverts);
+    // update coarse vertices
+    g_evalOutput->UpdateData(&g_positions[0], 0, nverts);
 
-    g_computeCtrl.Compute(g_computeCtx, g_kernelBatches, g_vertexData, g_varyingData);
+    // update coarse varying
+    if (g_drawMode == kVARYING) {
+        g_evalOutput->UpdateVaryingData(&g_varyingColors[0], 0, nverts);
+
+    }
+
+    // Refine
+    g_evalOutput->Refine();
 
     s.Stop();
     g_computeTime = float(s.GetElapsed() * 1000.0f);
@@ -283,208 +574,309 @@ updateGeom() {
 
     s.Start();
 
-    // Reset the output buffer
+    // Apply 'dynamics' update
+    assert(g_particles);
 
-    g_nsamplesFound=0;
+    float elapsed = g_currentTime - g_prevTime;
+    g_particles->Update(elapsed);
+    g_prevTime = g_currentTime;
 
-    // The varying data ends-up interleaved in the same g_Q output buffer because
-    // g_Q has a stride of 6 and g_vdesc sets the offset to 3, while g_odesc sets
-    // the offset to 0
-    switch (g_drawMode) {
-        case kVARYING     : g_evalCtrl.BindVaryingBuffers( g_idesc, g_varyingData, g_vdesc, g_Q ); break;
+    std::vector<OpenSubdiv::Osd::PatchCoord> const &patchCoords
+        = g_particles->GetPatchCoords();
 
-        case kFACEVARYING : //g_evalCtrl.BindFacevaryingBuffers( g_fvidesc, g_fvodesc, g_Q ); break;
+    // update patchcoord to be evaluated
+    g_evalOutput->UpdatePatchCoords(patchCoords);
 
-        case kUV :
-
-        default : g_evalCtrl.Unbind(); break;
+    // Evaluate the positions of the samples on the limit surface
+    if (g_drawMode == kMEAN_CURVATURE) {
+        // evaluate positions and 2nd derivatives
+        g_evalOutput->EvalPatchesWith2ndDerivatives();
+    } else if (g_drawMode == kNORMAL || g_drawMode == kSHADE) {
+        // evaluate positions and 1st derivatives
+        g_evalOutput->EvalPatchesWith1stDerivatives();
+    } else {
+        // evaluate positions
+        g_evalOutput->EvalPatches();
     }
 
-    // Bind/Unbind of the vertex buffers to the context needs to happen
-    // outside of the parallel loop
-    g_evalCtrl.BindVertexBuffers( g_idesc, g_vertexData, g_odesc, g_Q, g_dQu, g_dQv );
-
-#define USE_OPENMP
-#if defined(OPENSUBDIV_HAS_OPENMP) and defined(USE_OPENMP)
-    #pragma omp parallel for
-#endif
-    for (int i=0; i<(int)g_coords.size(); ++i) {
-
-        int n = g_evalCtrl.EvalLimitSample( g_coords[i], g_evalCtx, i );
-
-        if (n) {
-            // point colors
-            switch (g_drawMode) {
-                case kUV : { float * color = g_Q->BindCpuBuffer() + i*g_Q->GetNumElements()  + 3;
-                             color[0] = g_coords[i].u;
-                             color[1] = 0.0f;
-                             color[2] = g_coords[i].v; } break;
-
-                case kVARYING : break;
-
-                case kFACEVARYING : break;
-
-                default : break;
-           }
-#if defined(OPENSUBDIV_HAS_OPENMP) and defined(USE_OPENMP)
-            #pragma omp atomic
-#endif
-            g_nsamplesFound += n;
-        } else {
-            // "hide" unfound samples (hole tags...) as a black dot at the origin
-            float * sample = g_Q->BindCpuBuffer() + i*g_Q->GetNumElements();
-            memset(sample, 0, g_Q->GetNumElements() * sizeof(float));
-        }
+    // color
+    if (g_drawMode == kVARYING) {
+        g_evalOutput->EvalPatchesVarying();
+    } else if (g_drawMode == kFACEVARYING && g_evalOutput->HasFaceVaryingData()) {
+        g_evalOutput->EvalPatchesFaceVarying();
     }
-
-    g_evalCtrl.Unbind();
-
-    g_Q->BindVBO();
 
     s.Stop();
 
-    g_evalTime = float(s.GetElapsed() * 1000.0f);
+    g_evalTime = float(s.GetElapsed());
 }
 
 //------------------------------------------------------------------------------
 static void
 createOsdMesh(ShapeDesc const & shapeDesc, int level) {
 
+    Shape * shape = Shape::parseObj(shapeDesc);
 
-    Shape * shape = Shape::parseObj(shapeDesc.data.c_str(), shapeDesc.scheme);
+    // create Far mesh (topology)
+    Sdc::SchemeType sdctype = GetSdcType(*shape);
+    Sdc::Options sdcoptions = GetSdcOptions(*shape);
 
-    // create Vtr mesh (topology)
-    OpenSubdiv::Sdc::Type       sdctype = GetSdcType(*shape);
-    OpenSubdiv::Sdc::Options sdcoptions = GetSdcOptions(*shape);
+    sdcoptions.SetFVarLinearInterpolation(g_fvarBoundary);
 
-    OpenSubdiv::Far::TopologyRefiner * refiner =
-        OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Create(sdctype, sdcoptions, *shape);
+    Far::TopologyRefiner *topologyRefiner =
+        Far::TopologyRefinerFactory<Shape>::Create(*shape,
+            Far::TopologyRefinerFactory<Shape>::Options(sdctype, sdcoptions));
 
     g_orgPositions=shape->verts;
-    g_positions.resize(g_orgPositions.size(),0.0f);
+    g_positions.resize(g_orgPositions.size(), 0.0f);
+
+    // compute model bounding
+    float min[3] = { FLT_MAX,  FLT_MAX,  FLT_MAX};
+    float max[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    for (size_t i=0; i <g_orgPositions.size()/3; ++i) {
+        for(int j=0; j<3; ++j) {
+            float v = g_orgPositions[i*3+j];
+            min[j] = std::min(min[j], v);
+            max[j] = std::max(max[j], v);
+        }
+    }
+    for (int j=0; j<3; ++j) {
+        g_center[j] = (min[j] + max[j]) * 0.5f;
+        g_size += (max[j]-min[j])*(max[j]-min[j]);
+    }
+    g_size = sqrtf(g_size);
+
+
+    float speed = g_particles ? g_particles->GetSpeed() : 0.2f;
+
+    // save coarse topology (used for coarse mesh drawing)
+    g_controlMeshDisplay.SetTopology(topologyRefiner->GetLevel(0));
+
+    // create random varying color
+    {
+        int numCoarseVerts = topologyRefiner->GetLevel(0).GetNumVertices();
+        g_varyingColors.resize(numCoarseVerts*3);
+        createRandomColors(numCoarseVerts, 3, &g_varyingColors[0]);
+    }
+
+    Far::StencilTable const * vertexStencils = NULL;
+    Far::StencilTable const * varyingStencils = NULL;
+    Far::StencilTable const * faceVaryingStencils = NULL;
+
+    int fvarChannel = 0;
+    int fvarWidth = shape->GetFVarWidth();
+    bool hasFVarData = !shape->uvs.empty();
+
+    {
+        if (g_adaptive) {
+            // Apply feature adaptive refinement to the mesh so that we can use the
+            // limit evaluation API features.
+            Far::TopologyRefiner::AdaptiveOptions options(level);
+            options.considerFVarChannels = hasFVarData;
+            options.useSingleCreasePatch = g_singleCreasePatch;
+            options.useInfSharpPatch = g_infSharpPatch;
+            topologyRefiner->RefineAdaptive(options);
+        } else {
+            Far::TopologyRefiner::UniformOptions options(level);
+            topologyRefiner->RefineUniform(options);
+        }
+
+        // Generate stencil table to update the bi-cubic patches control
+        // vertices after they have been re-posed (both for vertex & varying
+        // interpolation)
+        Far::StencilTableFactory::Options soptions;
+        soptions.generateOffsets=true;
+        soptions.generateIntermediateLevels=g_adaptive;
+
+        vertexStencils =
+            Far::StencilTableFactory::Create(*topologyRefiner, soptions);
+
+        soptions.interpolationMode = Far::StencilTableFactory::INTERPOLATE_VARYING;
+        varyingStencils =
+            Far::StencilTableFactory::Create(*topologyRefiner, soptions);
+
+        if (hasFVarData) {
+            soptions.interpolationMode = Far::StencilTableFactory::INTERPOLATE_FACE_VARYING;
+            soptions.fvarChannel = fvarChannel;
+            faceVaryingStencils =
+                Far::StencilTableFactory::Create(*topologyRefiner, soptions);
+        }
+
+        // Generate bi-cubic patch table for the limit surface
+        Far::PatchTableFactory::Options poptions(level);
+        if (g_endCap == kEndCapBilinearBasis) {
+            poptions.SetEndCapType(
+                Far::PatchTableFactory::Options::ENDCAP_BILINEAR_BASIS);
+        } else if (g_endCap == kEndCapBSplineBasis) {
+            poptions.SetEndCapType(
+                Far::PatchTableFactory::Options::ENDCAP_BSPLINE_BASIS);
+        } else {
+            poptions.SetEndCapType(
+                Far::PatchTableFactory::Options::ENDCAP_GREGORY_BASIS);
+        }
+        poptions.generateLegacySharpCornerPatches = !g_smoothCornerPatch;
+        poptions.useSingleCreasePatch = g_singleCreasePatch;
+        poptions.useInfSharpPatch = g_infSharpPatch;
+        poptions.generateFVarTables = hasFVarData;
+        poptions.generateFVarLegacyLinearPatches = false;
+        poptions.includeFVarBaseLevelIndices = true;;
+
+        Far::PatchTable const * patchTable =
+            Far::PatchTableFactory::Create(*topologyRefiner, poptions);
+
+        // append local points stencils
+        if (Far::StencilTable const *localPointStencilTable =
+            patchTable->GetLocalPointStencilTable()) {
+            Far::StencilTable const *table =
+                Far::StencilTableFactory::AppendLocalPointStencilTable(
+                    *topologyRefiner, vertexStencils, localPointStencilTable);
+            delete vertexStencils;
+            vertexStencils = table;
+        }
+        if (Far::StencilTable const *localPointVaryingStencilTable =
+            patchTable->GetLocalPointVaryingStencilTable()) {
+            Far::StencilTable const *table =
+                Far::StencilTableFactory::AppendLocalPointStencilTable(
+                    *topologyRefiner,
+                    varyingStencils, localPointVaryingStencilTable);
+            delete varyingStencils;
+            varyingStencils = table;
+        }
+        if (Far::StencilTable const *localPointFaceVaryingStencilTable =
+            patchTable->GetLocalPointFaceVaryingStencilTable()) {
+            Far::StencilTable const *table =
+                Far::StencilTableFactory::AppendLocalPointStencilTableFaceVarying(
+                    *topologyRefiner,
+                    faceVaryingStencils, localPointFaceVaryingStencilTable);
+            delete faceVaryingStencils;
+            faceVaryingStencils = table;
+        }
+
+        if (g_patchTable) delete g_patchTable;
+        g_patchTable = patchTable;
+    }
+
+    // In following template instantiations, same type of vertex buffers are
+    // used for both source and destination (first and second template
+    // parameters), since we'd like to draw control mesh wireframe too in
+    // this example viewer.
+    // If we don't need to draw the coarse control mesh, the src buffer doesn't
+    // have to be interoperable to GL (it can be CpuVertexBuffer etc).
+
+    delete g_evalOutput;
+    if (g_kernel == kCPU) {
+        g_evalOutput = new EvalOutput<Osd::CpuGLVertexBuffer,
+                                      Osd::CpuGLVertexBuffer,
+                                      Far::StencilTable,
+                                      Osd::CpuPatchTable,
+                                      Osd::CpuEvaluator>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+             fvarChannel, fvarWidth,
+             g_nParticles, g_patchTable);
+#ifdef OPENSUBDIV_HAS_OPENMP
+    } else if (g_kernel == kOPENMP) {
+        g_evalOutput = new EvalOutput<Osd::CpuGLVertexBuffer,
+                                      Osd::CpuGLVertexBuffer,
+                                      Far::StencilTable,
+                                      Osd::CpuPatchTable,
+                                      Osd::OmpEvaluator>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable);
+#endif
+#ifdef OPENSUBDIV_HAS_TBB
+    } else if (g_kernel == kTBB) {
+        g_evalOutput = new EvalOutput<Osd::CpuGLVertexBuffer,
+                                      Osd::CpuGLVertexBuffer,
+                                      Far::StencilTable,
+                                      Osd::CpuPatchTable,
+                                      Osd::TbbEvaluator>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable);
+#endif
+#ifdef OPENSUBDIV_HAS_CUDA
+    } else if (g_kernel == kCUDA) {
+        g_evalOutput = new EvalOutput<Osd::CudaGLVertexBuffer,
+                                      Osd::CudaGLVertexBuffer,
+                                      Osd::CudaStencilTable,
+                                      Osd::CudaPatchTable,
+                                      Osd::CudaEvaluator>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable);
+#endif
+#ifdef OPENSUBDIV_HAS_OPENCL
+    } else if (g_kernel == kCL) {
+        static Osd::EvaluatorCacheT<Osd::CLEvaluator> clEvaluatorCache;
+        g_evalOutput = new EvalOutput<Osd::CLGLVertexBuffer,
+                                      Osd::CLGLVertexBuffer,
+                                      Osd::CLStencilTable,
+                                      Osd::CLPatchTable,
+                                      Osd::CLEvaluator,
+                                      CLDeviceContext>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable,
+            &clEvaluatorCache, &g_clDeviceContext);
+#endif
+#ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
+    } else if (g_kernel == kGLXFB) {
+        static Osd::EvaluatorCacheT<Osd::GLXFBEvaluator> glXFBEvaluatorCache;
+        g_evalOutput = new EvalOutput<Osd::GLVertexBuffer,
+                                      Osd::GLVertexBuffer,
+                                      Osd::GLStencilTableTBO,
+                                      Osd::GLPatchTable,
+                                      Osd::GLXFBEvaluator,
+                                      XFBDeviceContext>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable,
+             &glXFBEvaluatorCache, &g_xfbDeviceContext);
+#endif
+#ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
+    } else if (g_kernel == kGLCompute) {
+        static Osd::EvaluatorCacheT<Osd::GLComputeEvaluator> glComputeEvaluatorCache;
+        g_evalOutput = new EvalOutput<Osd::GLVertexBuffer,
+                                      Osd::GLVertexBuffer,
+                                      Osd::GLStencilTableSSBO,
+                                      Osd::GLPatchTable,
+                                      Osd::GLComputeEvaluator>
+            (vertexStencils, varyingStencils, faceVaryingStencils,
+            fvarChannel, fvarWidth,
+            g_nParticles, g_patchTable,
+             &glComputeEvaluatorCache);
+#endif
+    }
+
+    if (g_evalOutput->HasFaceVaryingData()) {
+        g_evalOutput->UpdateFaceVaryingData(
+            &shape->uvs[0], 0, (int)shape->uvs.size()/shape->GetFVarWidth());
+    }
 
     delete shape;
 
-    int nptexfaces = getNumPtexFaces(*refiner),
-        nsamples = createRandomSamples( nptexfaces, g_nsamples, g_coords ),
-        nverts = 0;
+    // Create the 'uv particles' manager - this class manages the limit
+    // location samples (ptex face index, (s,t) and updates them between frames.
+    // Note: the number of limit locations can be entirely arbitrary
+    delete g_particles;
+    g_particles = new STParticles(*topologyRefiner, g_patchTable,
+                                  g_nParticles, !g_randomStart);
+    g_nParticles = g_particles->GetNumParticles();
+    g_particles->SetSpeed(speed);
 
-    createCoarseMesh(*refiner);
-
-    {
-        refiner->RefineAdaptive(level);
-
-        nverts = refiner->GetNumVerticesTotal();
-
-        Far::StencilTablesFactory::Options options;
-        options.generateOffsets=true;
-        options.generateAllLevels=true;
-
-        // Generate stencil tables
-        Far::StencilTables const * vertexStencils =
-            Far::StencilTablesFactory::Create(*refiner, options);
-
-        options.interpolationMode = Far::StencilTablesFactory::INTERPOLATE_VARYING;
-        Far::StencilTables const * varyingStencils =
-            Far::StencilTablesFactory::Create(*refiner, options);
-
-        g_kernelBatches.clear();
-        g_kernelBatches.push_back(Far::StencilTablesFactory::Create(*vertexStencils));
-
-
-        // Generate adaptive patch tables
-        Far::PatchTables const * patchTables =
-             Far::PatchTablesFactory::Create(*refiner);
-
-        // Create a Compute context, used to "pose" the vertices
-        delete g_computeCtx;
-        g_computeCtx = Osd::CpuComputeContext::Create(vertexStencils, varyingStencils);
-
-        // Create a limit Eval context
-        delete g_evalCtx;
-        g_evalCtx = Osd::CpuEvalLimitContext::Create(*patchTables);
-    }
-
-    delete refiner;
-
-    {   // Create vertex data buffer & populate w/ positions
-        delete g_vertexData;
-        g_vertexData = Osd::CpuVertexBuffer::Create(3, nverts);
-
-        // Create primvar v-buffer & populate w/ colors or (u,v) data
-        delete g_varyingData; g_varyingData = 0;
-        if (g_drawMode==kVARYING) {
-            g_varyingData = Osd::CpuVertexBuffer::Create(3, nverts);
-            g_varyingData->UpdateData( &g_varyingColors[0], 0, nverts);
-        }
-
-        // Create output data buffers
-        delete g_Q;
-        g_Q = Osd::CpuGLVertexBuffer::Create(6,nsamples);
-        memset( g_Q->BindCpuBuffer(), 0, nsamples*6*sizeof(float));
-
-        delete g_dQu;
-        g_dQu = Osd::CpuGLVertexBuffer::Create(6,nsamples);
-        memset( g_dQu->BindCpuBuffer(), 0, nsamples*6*sizeof(float));
-
-        delete g_dQv;
-        g_dQv = Osd::CpuGLVertexBuffer::Create(6,nsamples);
-        memset( g_dQv->BindCpuBuffer(), 0, nsamples*6*sizeof(float));
-
-    }
+    g_prevTime = -1;
+    g_currentTime = 0;
 
     updateGeom();
 
-    // Bind g_Q as a GL_POINTS VBO
-    glBindVertexArray(g_samplesVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g_Q->BindVBO());
-
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, 0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, (float*)12);
-
-    glBindVertexArray(0);
-}
-
-//------------------------------------------------------------------------------
-struct Program
-{
-    GLuint program;
-    GLuint uniformModelViewProjectionMatrix;
-    GLuint attrPosition;
-    GLuint attrColor;
-} g_defaultProgram;
-
-//------------------------------------------------------------------------------
-static void
-checkGLErrors(std::string const & where = "")
-{
-    GLuint err;
-    while ((err = glGetError()) != GL_NO_ERROR) {
-
-        std::cerr << "GL error: "
-                  << (where.empty() ? "" : where + " ")
-                  << err << "\n";
-    }
-}
-
-//------------------------------------------------------------------------------
-static GLuint
-compileShader(GLenum shaderType, const char *source)
-{
-    GLuint shader = glCreateShader(shaderType);
-    glShaderSource(shader, 1, &source, NULL);
-    glCompileShader(shader);
-    checkGLErrors("compileShader");
-    return shader;
+    delete topologyRefiner;
 }
 
 //------------------------------------------------------------------------------
 static bool
-linkDefaultProgram()
-{
+linkDefaultProgram() {
+
 #if defined(GL_ARB_tessellation_shader) || defined(GL_VERSION_4_0)
     #define GLSL_VERSION_DEFINE "#version 400\n"
 #else
@@ -495,12 +887,45 @@ linkDefaultProgram()
         GLSL_VERSION_DEFINE
         "in vec3 position;\n"
         "in vec3 color;\n"
+        "in vec3 du;\n"
+        "in vec3 dv;\n"
+        "in vec3 duu;\n"
+        "in vec3 duv;\n"
+        "in vec3 dvv;\n"
+        "in vec2 patchCoord;\n"
+        "in vec2 fvarData;\n"
         "out vec4 fragColor;\n"
-        "uniform mat4 ModelViewProjectionMatrix;\n"
+        "uniform mat4 ModelViewMatrix;\n"
+        "uniform mat4 ProjectionMatrix;\n"
+        "uniform int DrawMode;\n"
         "void main() {\n"
-        "  fragColor = vec4(color, 1);\n"
-        "  gl_Position = ModelViewProjectionMatrix * "
+        "  vec3 normal = (ModelViewMatrix * "
+        "               vec4(normalize(cross(du, dv)), 0)).xyz;\n"
+        "  gl_Position = ProjectionMatrix * ModelViewMatrix * "
         "                  vec4(position, 1);\n"
+        "  if (DrawMode == 0) {\n" // UV
+        "    fragColor = vec4(patchCoord.x, patchCoord.y, 0, 1);\n"
+        "  } else if (DrawMode == 2) {\n"
+        "    fragColor = vec4(normal*0.5+vec3(0.5), 1);\n"
+        "  } else if (DrawMode == 3) {\n"
+        "    fragColor = vec4(vec3(1)*dot(normal, vec3(0,0,1)), 1);\n"
+        "  } else if (DrawMode == 4) {\n"  // face varying
+        "    // generating a checkerboard pattern\n"
+        "    int checker = int(floor(20*fvarData.r)+floor(20*fvarData.g))&1;\n"
+        "    fragColor = vec4(fvarData.rg*checker, 1-checker, 1);\n"
+        "  } else if (DrawMode == 5) {\n"  // mean curvature
+        "    vec3 N = normalize(cross(du, dv));\n"
+        "    float E = dot(du, du);\n"
+        "    float F = dot(du, dv);\n"
+        "    float G = dot(dv, dv);\n"
+        "    float e = dot(N, duu);\n"
+        "    float f = dot(N, duv);\n"
+        "    float g = dot(N, dvv);\n"
+        "    float H = 0.5 * abs(0.5 * (E*g - 2*F*f - G*e) / (E*G - F*F));\n"
+        "    fragColor = vec4(H, H, H, 1.0);\n"
+        "  } else {\n" // varying
+        "    fragColor = vec4(color, 1);\n"
+        "  }\n"
         "}\n";
 
     static const char *fsSrc =
@@ -512,14 +937,21 @@ linkDefaultProgram()
         "}\n";
 
     GLuint program = glCreateProgram();
-    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vsSrc);
-    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fsSrc);
+    GLuint vertexShader = GLUtils::CompileShader(GL_VERTEX_SHADER, vsSrc);
+    GLuint fragmentShader = GLUtils::CompileShader(GL_FRAGMENT_SHADER, fsSrc);
 
     glAttachShader(program, vertexShader);
     glAttachShader(program, fragmentShader);
 
     glBindAttribLocation(program, 0, "position");
     glBindAttribLocation(program, 1, "color");
+    glBindAttribLocation(program, 2, "du");
+    glBindAttribLocation(program, 3, "dv");
+    glBindAttribLocation(program, 4, "duu");
+    glBindAttribLocation(program, 5, "duv");
+    glBindAttribLocation(program, 6, "dvv");
+    glBindAttribLocation(program, 7, "patchCoord");
+    glBindAttribLocation(program, 8, "fvarData");
     glBindFragDataLocation(program, 0, "color");
 
     glLinkProgram(program);
@@ -537,138 +969,82 @@ linkDefaultProgram()
     }
 
     g_defaultProgram.program = program;
-    g_defaultProgram.uniformModelViewProjectionMatrix =
-        glGetUniformLocation(program, "ModelViewProjectionMatrix");
+    g_defaultProgram.uniformModelViewMatrix =
+        glGetUniformLocation(program, "ModelViewMatrix");
+    g_defaultProgram.uniformProjectionMatrix =
+        glGetUniformLocation(program, "ProjectionMatrix");
+    g_defaultProgram.uniformDrawMode =
+        glGetUniformLocation(program, "DrawMode");
     g_defaultProgram.attrPosition = glGetAttribLocation(program, "position");
     g_defaultProgram.attrColor = glGetAttribLocation(program, "color");
+    g_defaultProgram.attrDu = glGetAttribLocation(program, "du");
+    g_defaultProgram.attrDv = glGetAttribLocation(program, "dv");
+    g_defaultProgram.attrDuu = glGetAttribLocation(program, "duu");
+    g_defaultProgram.attrDuv = glGetAttribLocation(program, "duv");
+    g_defaultProgram.attrDvv = glGetAttribLocation(program, "dvv");
+    g_defaultProgram.attrPatchCoord = glGetAttribLocation(program, "patchCoord");
+    g_defaultProgram.attrFVarData = glGetAttribLocation(program, "fvarData");
 
     return true;
 }
 
 //------------------------------------------------------------------------------
-static inline void
-setSharpnessColor(float s, float *r, float *g, float *b)
-{
-    //  0.0       2.0       4.0
-    // green --- yellow --- red
-    *r = std::min(1.0f, s * 0.5f);
-    *g = std::min(1.0f, 2.0f - s*0.5f);
-    *b = 0;
-}
-
-//------------------------------------------------------------------------------
-static void
-drawCageEdges() {
-
-    glUseProgram(g_defaultProgram.program);
-    glUniformMatrix4fv(g_defaultProgram.uniformModelViewProjectionMatrix,
-                       1, GL_FALSE, g_transformData.ModelViewProjectionMatrix);
-
-    std::vector<float> vbo;
-    vbo.reserve(g_coarseEdges.size() * 6);
-    float r, g, b;
-    for (int i = 0; i < (int)g_coarseEdges.size(); i+=2) {
-        setSharpnessColor(g_coarseEdgeSharpness[i/2], &r, &g, &b);
-        for (int j = 0; j < 2; ++j) {
-            vbo.push_back(g_positions[g_coarseEdges[i+j]*3]);
-            vbo.push_back(g_positions[g_coarseEdges[i+j]*3+1]);
-            vbo.push_back(g_positions[g_coarseEdges[i+j]*3+2]);
-            vbo.push_back(r);
-            vbo.push_back(g);
-            vbo.push_back(b);
-        }
-    }
-
-    glBindVertexArray(g_cageEdgeVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g_cageEdgeVBO);
-    glBufferData(GL_ARRAY_BUFFER, (int)vbo.size() * sizeof(float), &vbo[0],
-                 GL_STATIC_DRAW);
-
-    glEnableVertexAttribArray(g_defaultProgram.attrPosition);
-    glEnableVertexAttribArray(g_defaultProgram.attrColor);
-    glVertexAttribPointer(g_defaultProgram.attrPosition,
-                          3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, 0);
-    glVertexAttribPointer(g_defaultProgram.attrColor,
-                          3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, (void*)12);
-
-    glDrawArrays(GL_LINES, 0, (int)g_coarseEdges.size());
-
-    glBindVertexArray(0);
-    glUseProgram(0);
-}
-
-//------------------------------------------------------------------------------
-static void
-drawCageVertices() {
-
-    glUseProgram(g_defaultProgram.program);
-    glUniformMatrix4fv(g_defaultProgram.uniformModelViewProjectionMatrix,
-                       1, GL_FALSE, g_transformData.ModelViewProjectionMatrix);
-
-    int numPoints = (int)g_positions.size()/3;
-    std::vector<float> vbo;
-    vbo.reserve(numPoints*6);
-    float r, g, b;
-    for (int i = 0; i < numPoints; ++i) {
-
-        switch (g_drawMode) {
-
-            case kVARYING : { r=g_varyingColors[i*3+0];
-                              g=g_varyingColors[i*3+1];
-                              b=g_varyingColors[i*3+2];
-                            } break;
-
-            case kUV      : { setSharpnessColor(g_coarseVertexSharpness[i], &r, &g, &b);
-                            } break;
-
-            default : break;
-        }
-
-        vbo.push_back(g_positions[i*3+0]);
-        vbo.push_back(g_positions[i*3+1]);
-        vbo.push_back(g_positions[i*3+2]);
-        vbo.push_back(r);
-        vbo.push_back(g);
-        vbo.push_back(b);
-    }
-
-    glBindVertexArray(g_cageVertexVAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, g_cageVertexVBO);
-    glBufferData(GL_ARRAY_BUFFER, (int)vbo.size() * sizeof(float), &vbo[0],
-                 GL_STATIC_DRAW);
-
-    glEnableVertexAttribArray(g_defaultProgram.attrPosition);
-    glEnableVertexAttribArray(g_defaultProgram.attrColor);
-    glVertexAttribPointer(g_defaultProgram.attrPosition,
-                          3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, 0);
-    glVertexAttribPointer(g_defaultProgram.attrColor,
-                          3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, (void*)12);
-
-    glPointSize(10.0f);
-    glDrawArrays(GL_POINTS, 0, numPoints);
-    glPointSize(1.0f);
-
-    glBindVertexArray(0);
-    glUseProgram(0);
-}
-
-//------------------------------------------------------------------------------
 static void
 drawSamples() {
-
     glUseProgram(g_defaultProgram.program);
 
-    glUniformMatrix4fv(g_defaultProgram.uniformModelViewProjectionMatrix,
-                       1, GL_FALSE, g_transformData.ModelViewProjectionMatrix);
-
+    glUniformMatrix4fv(g_defaultProgram.uniformModelViewMatrix,
+                       1, GL_FALSE, g_transformData.ModelViewMatrix);
+    glUniformMatrix4fv(g_defaultProgram.uniformProjectionMatrix,
+                       1, GL_FALSE, g_transformData.ProjectionMatrix);
+    glUniform1i(g_defaultProgram.uniformDrawMode, g_drawMode);
 
     glBindVertexArray(g_samplesVAO);
 
+    glEnableVertexAttribArray(g_defaultProgram.attrPosition);
+    glEnableVertexAttribArray(g_defaultProgram.attrColor);
+    glBindBuffer(GL_ARRAY_BUFFER, g_evalOutput->BindVertexData());
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, 0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, (float*)12);
+
+    glEnableVertexAttribArray(g_defaultProgram.attrDu);
+    glEnableVertexAttribArray(g_defaultProgram.attrDv);
+    glBindBuffer(GL_ARRAY_BUFFER, g_evalOutput->Bind1stDerivatives());
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, 0);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 6, (float*)12);
+
+    glEnableVertexAttribArray(g_defaultProgram.attrDuu);
+    glEnableVertexAttribArray(g_defaultProgram.attrDuv);
+    glEnableVertexAttribArray(g_defaultProgram.attrDvv);
+    glBindBuffer(GL_ARRAY_BUFFER, g_evalOutput->Bind2ndDerivatives());
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 9, 0);
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 9, (float*)12);
+    glVertexAttribPointer(6, 3, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 9, (float*)24);
+
+    glEnableVertexAttribArray(g_defaultProgram.attrPatchCoord);
+    glBindBuffer(GL_ARRAY_BUFFER, g_evalOutput->BindPatchCoords());
+    glVertexAttribPointer(7, 2, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 5, (float*)12);
+
+    if (g_evalOutput->HasFaceVaryingData()) {
+        glEnableVertexAttribArray(g_defaultProgram.attrFVarData);
+        glBindBuffer(GL_ARRAY_BUFFER, g_evalOutput->BindFaceVaryingData());
+        glVertexAttribPointer(8, 2, GL_FLOAT, GL_FALSE, sizeof (GLfloat) * 2, 0);
+    }
+
+    glPointSize(2.0f);
+    int nPatchCoords = (int)g_particles->GetPatchCoords().size();
+    glDrawArrays(GL_POINTS, 0, nPatchCoords);
     glPointSize(1.0f);
-    glDrawArrays(GL_POINTS, 0, (int)g_coords.size());
-    glPointSize(1.0f);
+
+    glDisableVertexAttribArray(g_defaultProgram.attrPosition);
+    glDisableVertexAttribArray(g_defaultProgram.attrColor);
+    glDisableVertexAttribArray(g_defaultProgram.attrDu);
+    glDisableVertexAttribArray(g_defaultProgram.attrDv);
+    glDisableVertexAttribArray(g_defaultProgram.attrDuu);
+    glDisableVertexAttribArray(g_defaultProgram.attrDuv);
+    glDisableVertexAttribArray(g_defaultProgram.attrDvv);
+    glDisableVertexAttribArray(g_defaultProgram.attrPatchCoord);
+    glDisableVertexAttribArray(g_defaultProgram.attrFVarData);
 
     glBindVertexArray(0);
 
@@ -678,19 +1054,22 @@ drawSamples() {
 //------------------------------------------------------------------------------
 static void
 display() {
+
     Stopwatch s;
     s.Start();
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     glViewport(0, 0, g_width, g_height);
+    g_hud.FillBackground();
 
     double aspect = g_width/(double)g_height;
     identity(g_transformData.ModelViewMatrix);
     translate(g_transformData.ModelViewMatrix, -g_pan[0], -g_pan[1], -g_dolly);
     rotate(g_transformData.ModelViewMatrix, g_rotate[1], 1, 0, 0);
     rotate(g_transformData.ModelViewMatrix, g_rotate[0], 0, 1, 0);
-    rotate(g_transformData.ModelViewMatrix, -90, 1, 0, 0);
+    if (!g_yup) {
+        rotate(g_transformData.ModelViewMatrix, -90, 1, 0, 0);
+    }
     translate(g_transformData.ModelViewMatrix,
               -g_center[0], -g_center[1], -g_center[2]);
     perspective(g_transformData.ProjectionMatrix,
@@ -698,6 +1077,8 @@ display() {
     multMatrix(g_transformData.ModelViewProjectionMatrix,
                g_transformData.ModelViewMatrix,
                g_transformData.ProjectionMatrix);
+
+    glEnable(GL_DEPTH_TEST);
 
     s.Stop();
     float drawCpuTime = float(s.GetElapsed() * 1000.0f);
@@ -708,47 +1089,46 @@ display() {
 
     drawSamples();
 
-    if (g_drawCageEdges)
-        drawCageEdges();
-
-    if (g_drawCageVertices)
-        drawCageVertices();
+    // draw the control mesh
+    g_controlMeshDisplay.Draw(
+        g_evalOutput->BindSourceData(), 3*sizeof(float),
+        g_transformData.ModelViewProjectionMatrix);
 
     if (g_hud.IsVisible()) {
         g_fpsTimer.Stop();
-        double fps = 1.0/g_fpsTimer.GetElapsed();
+        double elapsed = g_fpsTimer.GetElapsed();
         g_fpsTimer.Start();
+        double fps = 1.0/elapsed;
+        if (g_animParticles) g_currentTime += (float)elapsed;
 
-        g_hud.DrawString(10, -120, "# Samples  : (%d/%d)", g_nsamplesFound, g_Q->GetNumVertices());
+        int nPatchCoords = (int)g_particles->GetPatchCoords().size();
+
+        g_hud.DrawString(10, -150, "Particle Speed ([) (]): %.1f", g_particles->GetSpeed());
+        g_hud.DrawString(10, -120, "# Samples  : (%d / %d)", nPatchCoords, g_nParticles);
         g_hud.DrawString(10, -100, "Compute    : %.3f ms", g_computeTime);
-        g_hud.DrawString(10, -80,  "Eval       : %.3f ms", g_evalTime);
+        g_hud.DrawString(10, -80,  "Eval       : %.3f ms", g_evalTime * 1000.f);
         g_hud.DrawString(10, -60,  "GPU Draw   : %.3f ms", drawGpuTime);
         g_hud.DrawString(10, -40,  "CPU Draw   : %.3f ms", drawCpuTime);
         g_hud.DrawString(10, -20,  "FPS        : %3.1f", fps);
-
-        if (g_drawMode==kFACEVARYING and g_evalCtx->GetFVarData().empty()) {
-            static char msg[21] = "No Face-Varying Data";
-            g_hud.DrawString(g_width/2-20/2*8, g_height/2, msg);
-        }
 
         g_hud.Flush();
     }
 
     glFinish();
 
-    checkGLErrors("display leave");
+    GLUtils::CheckGLErrors("display leave");
 }
 
 //------------------------------------------------------------------------------
 static void
 idle() {
 
-    if (not g_freeze)
+    if (! g_freeze)
         g_frame++;
 
     updateGeom();
 
-    if (g_repeatCount != 0 and g_frame >= g_repeatCount)
+    if (g_repeatCount != 0 && g_frame >= g_repeatCount)
         g_running = 0;
 }
 
@@ -766,7 +1146,7 @@ motion(GLFWwindow *, double dx, double dy) {
         // pan
         g_pan[0] -= g_dolly*(x - g_prev_x)/g_width;
         g_pan[1] += g_dolly*(y - g_prev_y)/g_height;
-    } else if ((g_mbutton[0] && !g_mbutton[1] && g_mbutton[2]) or
+    } else if ((g_mbutton[0] && !g_mbutton[1] && g_mbutton[2]) ||
                (!g_mbutton[0] && g_mbutton[1] && !g_mbutton[2])) {
         // dolly
         g_dolly -= g_dolly*0.01f*(x - g_prev_x);
@@ -801,7 +1181,7 @@ reshape(GLFWwindow *, int width, int height) {
     // window size might not match framebuffer size on a high DPI display
     glfwGetWindowSize(g_window, &windowWidth, &windowHeight);
 
-    g_hud.Rebuild(windowWidth, windowHeight);
+    g_hud.Rebuild(windowWidth, windowHeight, width, height);
 }
 
 //------------------------------------------------------------------------------
@@ -811,13 +1191,22 @@ void windowClose(GLFWwindow*) {
 
 //------------------------------------------------------------------------------
 static void
-setSamples(bool add)
-{
-    g_nsamples += add ? 1000 : -1000;
-
-    g_nsamples = std::max(0, g_nsamples);
+setSamples(bool add) {
+    if (add) {
+        g_nParticles = g_nParticles * 2;
+    } else {
+        g_nParticles = std::max(1, g_nParticles / 2);
+    }
 
     createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+}
+
+//------------------------------------------------------------------------------
+static void
+fitFrame() {
+
+    g_pan[0] = g_pan[1] = 0;
+    g_dolly = g_size;
 }
 
 //------------------------------------------------------------------------------
@@ -830,9 +1219,18 @@ keyboard(GLFWwindow *, int key, int /* scancode */, int event, int /* mods */) {
     switch (key) {
         case 'Q': g_running = 0; break;
 
+        case 'F': fitFrame(); break;
+
         case '=': setSamples(true); break;
 
         case '-': setSamples(false); break;
+
+        case '[': if (g_particles) {
+                      g_particles->SetSpeed(g_particles->GetSpeed()-0.1f);
+                  } break;
+        case ']': if (g_particles) {
+                      g_particles->SetSpeed(g_particles->GetSpeed()+0.1f);
+                  } break;
 
         case GLFW_KEY_ESCAPE: g_hud.SetVisible(!g_hud.IsVisible()); break;
     }
@@ -840,16 +1238,14 @@ keyboard(GLFWwindow *, int key, int /* scancode */, int event, int /* mods */) {
 
 //------------------------------------------------------------------------------
 static void
-callbackError(OpenSubdiv::Osd::ErrorType err, const char *message)
-{
-    printf("OsdError: %d\n", err);
-    printf("%s", message);
+callbackError(OpenSubdiv::Far::ErrorType err, const char *message) {
+    printf("OpenSubdiv Error: %d\n", err);
+    printf("    %s\n", message);
 }
 
 //------------------------------------------------------------------------------
 static void
-callbackModel(int m)
-{
+callbackModel(int m) {
     if (m < 0)
         m = 0;
 
@@ -862,174 +1258,249 @@ callbackModel(int m)
 
 //------------------------------------------------------------------------------
 static void
-callbackLevel(int l)
-{
+callbackEndCap(int endCap) {
+    g_endCap = endCap;
+    createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+}
+
+//------------------------------------------------------------------------------
+static void
+callbackKernel(int k) {
+
+    g_kernel = k;
+
+#ifdef OPENSUBDIV_HAS_OPENCL
+    if (g_kernel == kCL && (!g_clDeviceContext.IsInitialized())) {
+        if (g_clDeviceContext.Initialize() == false) {
+            printf("Error in initializing OpenCL\n");
+            exit(1);
+        }
+    }
+#endif
+#ifdef OPENSUBDIV_HAS_CUDA
+    if (g_kernel == kCUDA && (!g_cudaDeviceContext.IsInitialized())) {
+        if (g_cudaDeviceContext.Initialize() == false) {
+            printf("Error in initializing Cuda\n");
+            exit(1);
+        }
+    }
+#endif
+
+    createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+
+}
+
+//------------------------------------------------------------------------------
+static void
+callbackLevel(int l) {
     g_level = l;
     createOsdMesh(g_defaultShapes[g_currentShape], g_level);
 }
 
 //------------------------------------------------------------------------------
 static void
-callbackAnimate(bool checked, int /* m */)
-{
-    g_moveScale = checked;
-}
-
-//------------------------------------------------------------------------------
-static void
-callbackFreeze(bool checked, int /* f */)
-{
-    g_freeze = checked;
-}
-
-//------------------------------------------------------------------------------
-static void
-callbackDisplayCageVertices(bool checked, int /* d */)
-{
-    g_drawCageVertices = checked;
-}
-
-//------------------------------------------------------------------------------
-static void
-callbackDisplayCageEdges(bool checked, int /* d */)
-{
-    g_drawCageEdges = checked;
-}
-
-//------------------------------------------------------------------------------
-static void
-callbackDisplayVaryingColors(int mode)
-{
+callbackDisplayVaryingColors(int mode) {
     g_drawMode = mode;
-    createOsdMesh(g_defaultShapes[g_currentShape], g_level);
 }
-
 
 //------------------------------------------------------------------------------
 static void
-initHUD()
-{
-    int windowWidth = g_width, windowHeight = g_height;
+callbackCheckBox(bool checked, int button) {
+    switch (button) {
+    case kHUD_CB_DISPLAY_CONTROL_MESH_EDGES:
+        g_controlMeshDisplay.SetEdgesDisplay(checked);
+        break;
+    case kHUD_CB_DISPLAY_CONTROL_MESH_VERTS:
+        g_controlMeshDisplay.SetVerticesDisplay(checked);
+        break;
+    case kHUD_CB_ANIMATE_VERTICES:
+        g_moveScale = checked;
+        break;
+    case kHUD_CB_ANIMATE_PARTICLES:
+        g_animParticles = checked;
+        break;
+    case kHUD_CB_RANDOM_START:
+        g_randomStart = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        break;
+    case kHUD_CB_FREEZE:
+        g_freeze = checked;
+        break;
+    case kHUD_CB_ADAPTIVE:
+        g_adaptive = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        break;
+    case kHUD_CB_SMOOTH_CORNER_PATCH:
+        g_smoothCornerPatch = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        return;
+    case kHUD_CB_SINGLE_CREASE_PATCH:
+        g_singleCreasePatch = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        return;
+    case kHUD_CB_INF_SHARP_PATCH:
+        g_infSharpPatch = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        return;
+    }
+}
+
+//------------------------------------------------------------------------------
+static void
+initHUD() {
+    int windowWidth = g_width, windowHeight = g_height,
+        frameBufferWidth = g_width, frameBufferHeight = g_height;
 
     // window size might not match framebuffer size on a high DPI display
     glfwGetWindowSize(g_window, &windowWidth, &windowHeight);
+    glfwGetFramebufferSize(g_window, &frameBufferWidth, &frameBufferHeight);
 
-    g_hud.Init(windowWidth, windowHeight);
+    g_hud.Init(windowWidth, windowHeight, frameBufferWidth, frameBufferHeight);
 
-    g_hud.AddCheckBox("Cage Edges (H)", true, 10, 10, callbackDisplayCageEdges, 0, 'h');
-    g_hud.AddCheckBox("Cage Verts (J)", true, 10, 30, callbackDisplayCageVertices, 0, 'j');
-    g_hud.AddCheckBox("Animate vertices (M)", g_moveScale != 0, 10, 50, callbackAnimate, 0, 'm');
-    g_hud.AddCheckBox("Freeze (spc)", false, 10, 70, callbackFreeze, 0, ' ');
+    g_hud.AddCheckBox("Control edges (H)",
+                      g_controlMeshDisplay.GetEdgesDisplay(),
+                      10, 10, callbackCheckBox,
+                      kHUD_CB_DISPLAY_CONTROL_MESH_EDGES, 'h');
+    g_hud.AddCheckBox("Control vertices (J)",
+                      g_controlMeshDisplay.GetVerticesDisplay(),
+                      10, 30, callbackCheckBox,
+                      kHUD_CB_DISPLAY_CONTROL_MESH_VERTS, 'j');
+    g_hud.AddCheckBox("Animate vertices (M)", g_moveScale != 0,
+                      10, 50, callbackCheckBox, kHUD_CB_ANIMATE_VERTICES, 'm');
+    g_hud.AddCheckBox("Animate particles (P)", g_animParticles != 0,
+                      10, 70, callbackCheckBox, kHUD_CB_ANIMATE_PARTICLES, 'p');
+    g_hud.AddCheckBox("Freeze (spc)", g_freeze != 0,
+                      10, 90, callbackCheckBox, kHUD_CB_FREEZE, ' ');
+
+    g_hud.AddCheckBox("Random Start", g_randomStart,
+                      10, 110, callbackCheckBox, kHUD_CB_RANDOM_START);
+
+    int compute_pulldown = g_hud.AddPullDown("Compute (K)", 475, 10, 300,
+                                             callbackKernel, 'k');
+    g_hud.AddPullDownButton(compute_pulldown, "CPU", kCPU);
+#ifdef OPENSUBDIV_HAS_OPENMP
+    g_hud.AddPullDownButton(compute_pulldown, "OPENMP", kOPENMP);
+#endif
+#ifdef OPENSUBDIV_HAS_TBB
+    g_hud.AddPullDownButton(compute_pulldown, "TBB", kTBB);
+#endif
+#ifdef OPENSUBDIV_HAS_CUDA
+    g_hud.AddPullDownButton(compute_pulldown, "CUDA", kCUDA);
+#endif
+#ifdef OPENSUBDIV_HAS_OPENCL
+    if (CLDeviceContext::HAS_CL_VERSION_1_1()) {
+        g_hud.AddPullDownButton(compute_pulldown, "OpenCL", kCL);
+    }
+#endif
+#ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
+    g_hud.AddPullDownButton(compute_pulldown, "GL XFB", kGLXFB);
+#endif
+#ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
+    if (GLUtils::GL_ARBComputeShaderOrGL_VERSION_4_3()) {
+        g_hud.AddPullDownButton(compute_pulldown, "GL Compute", kGLCompute);
+    }
+#endif
 
     int shading_pulldown = g_hud.AddPullDown("Shading (W)", 250, 10, 250, callbackDisplayVaryingColors, 'w');
     g_hud.AddPullDownButton(shading_pulldown, "(u,v)", kUV, g_drawMode==kUV);
     g_hud.AddPullDownButton(shading_pulldown, "Varying", kVARYING, g_drawMode==kVARYING);
+    g_hud.AddPullDownButton(shading_pulldown, "Normal", kNORMAL, g_drawMode==kNORMAL);
+    g_hud.AddPullDownButton(shading_pulldown, "Shade", kSHADE, g_drawMode==kSHADE);
     g_hud.AddPullDownButton(shading_pulldown, "FaceVarying", kFACEVARYING, g_drawMode==kFACEVARYING);
+    g_hud.AddPullDownButton(shading_pulldown, "Mean Curvature", kMEAN_CURVATURE, g_drawMode==kMEAN_CURVATURE);
+
+    g_hud.AddCheckBox("Adaptive (`)", g_adaptive != 0, 10, 150, callbackCheckBox, kHUD_CB_ADAPTIVE, '`');
+
+    g_hud.AddCheckBox("Smooth Corner Patch (O)", g_smoothCornerPatch!=0,
+                      10, 170, callbackCheckBox, kHUD_CB_SMOOTH_CORNER_PATCH, 'o');
+//  g_hud.AddCheckBox("Single Crease Patch (S)", g_singleCreasePatch!=0,
+//                    10, 190, callbackCheckBox, kHUD_CB_SINGLE_CREASE_PATCH, 's');
+    g_hud.AddCheckBox("Inf Sharp Patch (I)", g_infSharpPatch!=0,
+                      10, 190, callbackCheckBox, kHUD_CB_INF_SHARP_PATCH, 'i');
+
+    int endcap_pulldown = g_hud.AddPullDown("End cap (E)", 10, 230, 200,
+                                            callbackEndCap, 'e');
+    g_hud.AddPullDownButton(endcap_pulldown, "Linear", kEndCapBilinearBasis,
+                            g_endCap == kEndCapBilinearBasis);
+    g_hud.AddPullDownButton(endcap_pulldown, "Regular", kEndCapBSplineBasis,
+                            g_endCap == kEndCapBSplineBasis);
+    g_hud.AddPullDownButton(endcap_pulldown, "Gregory", kEndCapGregoryBasis,
+                            g_endCap == kEndCapGregoryBasis);
 
     for (int i = 1; i < 11; ++i) {
         char level[16];
         sprintf(level, "Lv. %d", i);
-        g_hud.AddRadioButton(3, level, i==g_level, 10, 170+i*20, callbackLevel, i, '0'+(i%10));
+        g_hud.AddRadioButton(3, level, i==g_level, 10, 270+i*20, callbackLevel, i, '0'+(i%10));
     }
 
     int pulldown_handle = g_hud.AddPullDown("Shape (N)", -300, 10, 300, callbackModel, 'n');
     for (int i = 0; i < (int)g_defaultShapes.size(); ++i) {
         g_hud.AddPullDownButton(pulldown_handle, g_defaultShapes[i].name.c_str(),i);
     }
+
+    g_hud.Rebuild(windowWidth, windowHeight, frameBufferWidth, frameBufferHeight);
 }
 
 //------------------------------------------------------------------------------
 static void
-initGL()
-{
-    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+initGL() {
+
+    glClearColor(0.1f, 0.1f, 0.1f, 0.0f);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glCullFace(GL_BACK);
     glEnable(GL_CULL_FACE);
-
-    glGenVertexArrays(1, &g_cageVertexVAO);
-    glGenVertexArrays(1, &g_cageEdgeVAO);
     glGenVertexArrays(1, &g_samplesVAO);
-    glGenBuffers(1, &g_cageVertexVBO);
-    glGenBuffers(1, &g_cageEdgeVBO);
 }
 
 //------------------------------------------------------------------------------
 static void
 uninitGL() {
-
-    glDeleteBuffers(1, &g_cageVertexVBO);
-    glDeleteBuffers(1, &g_cageEdgeVBO);
-    glDeleteVertexArrays(1, &g_cageVertexVAO);
-    glDeleteVertexArrays(1, &g_cageEdgeVAO);
     glDeleteVertexArrays(1, &g_samplesVAO);
 }
 
 //------------------------------------------------------------------------------
 static void
-setGLCoreProfile()
-{
-    #define glfwOpenWindowHint glfwWindowHint
-    #define GLFW_OPENGL_VERSION_MAJOR GLFW_CONTEXT_VERSION_MAJOR
-    #define GLFW_OPENGL_VERSION_MINOR GLFW_CONTEXT_VERSION_MINOR
-
-    glfwOpenWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#if not defined(__APPLE__)
-    glfwOpenWindowHint(GLFW_OPENGL_VERSION_MAJOR, 4);
-    glfwOpenWindowHint(GLFW_OPENGL_VERSION_MINOR, 2);
-#else
-    glfwOpenWindowHint(GLFW_OPENGL_VERSION_MAJOR, 3);
-    glfwOpenWindowHint(GLFW_OPENGL_VERSION_MINOR, 2);
-#endif
-    glfwOpenWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+callbackErrorGLFW(int error, const char* description) {
+    fprintf(stderr, "GLFW Error (%d) : %s\n", error, description);
 }
 
 //------------------------------------------------------------------------------
 int main(int argc, char **argv) {
 
-    bool fullscreen = false;
+    ArgOptions args;
 
-    std::string str;
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "-f"))
-            fullscreen = true;
-        else {
-            std::ifstream ifs(argv[1]);
-            if (ifs) {
-                std::stringstream ss;
-                ss << ifs.rdbuf();
-                ifs.close();
-                str = ss.str();
-                g_defaultShapes.push_back(ShapeDesc(str.c_str(), argv[1], kCatmark));
-            }
-        }
-    }
+    args.Parse(argc, argv);
+    args.PrintUnrecognizedArgsWarnings();
 
-    Osd::SetErrorCallback(callbackError);
+    g_yup = args.GetYUp();
+    g_adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+    g_repeatCount = args.GetRepeatCount();
 
+    ViewerArgsUtils::PopulateShapes(args, &g_defaultShapes);
 
     initShapes();
 
-    if (not glfwInit()) {
+    Far::SetErrorCallback(callbackError);
+
+    glfwSetErrorCallback(callbackErrorGLFW);
+    if (! glfwInit()) {
         printf("Failed to initialize GLFW\n");
         return 1;
     }
 
     static const char windowTitle[] = "OpenSubdiv glEvalLimit " OPENSUBDIV_VERSION_STRING;
 
-#define CORE_PROFILE
-#ifdef CORE_PROFILE
-    setGLCoreProfile();
-#endif
+    GLUtils::SetMinimumGLVersion();
 
-    if (fullscreen) {
+    if (args.GetFullScreen()) {
 
         g_primary = glfwGetPrimaryMonitor();
 
         // apparently glfwGetPrimaryMonitor fails under linux : if no primary,
         // settle for the first one in the list
-        if (not g_primary) {
+        if (! g_primary) {
             int count=0;
             GLFWmonitor ** monitors = glfwGetMonitors(&count);
 
@@ -1044,13 +1515,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (not (g_window=glfwCreateWindow(g_width, g_height, windowTitle,
-                                       fullscreen and g_primary ? g_primary : NULL, NULL))) {
-        printf("Failed to open window.\n");
+    if (! (g_window=glfwCreateWindow(g_width, g_height, windowTitle,
+             args.GetFullScreen() && g_primary ? g_primary : NULL, NULL))) {
+        std::cerr << "Failed to create OpenGL context.\n";
         glfwTerminate();
         return 1;
     }
+
     glfwMakeContextCurrent(g_window);
+
+    GLUtils::InitializeGL();
+    GLUtils::PrintGLVersion();
 
     // accommodate high DPI displays (e.g. mac retina displays)
     glfwGetFramebufferSize(g_window, &g_width, &g_height);
@@ -1060,27 +1535,6 @@ int main(int argc, char **argv) {
     glfwSetCursorPosCallback(g_window, motion);
     glfwSetMouseButtonCallback(g_window, mouse);
     glfwSetWindowCloseCallback(g_window, windowClose);
-
-#if defined(OSD_USES_GLEW)
-#ifdef CORE_PROFILE
-    // this is the only way to initialize glew correctly under core profile context.
-    glewExperimental = true;
-#endif
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. Error = %s\n", glewGetErrorString(r));
-        exit(1);
-    }
-#ifdef CORE_PROFILE
-    // clear GL errors which was generated during glewInit()
-    glGetError();
-#endif
-#endif
-
-    //std::string & data = g_defaultShapes[ g_currentShape ].data;
-    //Scheme scheme = g_defaultShapes[ g_currentShape ].scheme;
-
-    //createOsdMesh( data, g_level, scheme );
-
     initGL();
     linkDefaultProgram();
 
@@ -1088,6 +1542,8 @@ int main(int argc, char **argv) {
 
     initHUD();
     callbackModel(g_currentShape);
+
+    g_fpsTimer.Start();
 
     while (g_running) {
         idle();

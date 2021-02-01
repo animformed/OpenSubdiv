@@ -27,14 +27,14 @@
 // Tutorial description:
 //
 // This tutorial shows how to safely create Hbr meshes from arbitrary topology.
-// Because Hbr is a half-edge data structure, it cannot represeent non-manifold
+// Because Hbr is a half-edge data structure, it cannot represent non-manifold
 // topology. Ensuring that the geometry used is manifold is a requirement to use
 // Hbr safely. This tutorial presents some simple tests to detect inappropriate
 // topology.
 //
 
-#include <hbr/mesh.h>
-#include <hbr/catmark.h>
+#include <opensubdiv/hbr/mesh.h>
+#include <opensubdiv/hbr/catmark.h>
 
 #include <cstdio>
 
@@ -49,7 +49,7 @@ struct Vertex {
     Vertex(Vertex const & src) {
         _position[0] = src._position[0];
         _position[1] = src._position[1];
-        _position[1] = src._position[1];
+        _position[2] = src._position[2];
     }
 
     void Clear( void * =0 ) { }
@@ -145,7 +145,7 @@ int main(int, char **) {
             Hhalfedge const * opposite = destination->GetEdge(origin);
 
             // Make sure that the vertices exist in the mesh
-            if (origin==NULL or destination==NULL) {
+            if (origin==NULL || destination==NULL) {
                 printf(" An edge was specified that connected a nonexistent vertex\n");
                 valid=false;
                 break;
@@ -159,7 +159,7 @@ int main(int, char **) {
             }
 
             // Check that no more than 2 faces are adjacent to the edge
-            if (opposite and opposite->GetOpposite() ) {
+            if (opposite && opposite->GetOpposite() ) {
                 printf(" A non-manifold edge incident to more than 2 faces was found\n");
                 valid=false;
                 break;

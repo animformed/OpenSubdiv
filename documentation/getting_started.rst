@@ -30,9 +30,6 @@ Getting Started
    :backlinks: none
 
 
-Getting started with Git and accessing the source code.
-
-
 Downloading the code
 ====================
 
@@ -43,7 +40,7 @@ You can access the OpenSubdiv Git repository at https://github.com/PixarAnimatio
 
 From there, there are several ways of downloading the OpenSubdiv source code.
 
-    - Zip archive : downloaded from `here <https://github.com/PixarAnimationStudios/OpenSubdiv/archive/dev.zip>`__
+    - Zip archive : downloaded from `here <https://github.com/PixarAnimationStudios/OpenSubdiv/archive/master.zip>`__
 
     - Using a GUI client : you can find a list `here <http://git-scm.com/downloads/guis>`__
       Please refer to the documentation of your preferred application.
@@ -76,13 +73,13 @@ Branches & Git Flow
 Since version 1.1.0, OpenSubdiv has adopted the `Git Flow
 <http://nvie.com/posts/a-successful-git-branching-model/>`__ branching model .
 
-Our active development branch is named *dev* : all new features and buf fixes should
+Our active development branch is named *dev* : all new features and bug fixes should
 be submitted to this branch. The changes submitted to the dev branch are periodically
 patched to the 'master' branch as new versions are released.
 
-.. image:: images/gitflow.jpg
+.. image:: images/git_flow.png
    :align: center
-   :target: images/gitflow.jpg
+   :target: images/git_flow.png
 
 
 Checking out branches
@@ -166,7 +163,3 @@ The OpenSubdiv code base contains the following main areas:
 |                      | our APIs. If GPU SDKs are detected, some tests will attempt to run computations       |
 |                      | on those GPUs.                                                                        |
 +----------------------+---------------------------------------------------------------------------------------+
-
-----
-
-Next : `Building OpenSubdiv <cmake_build.html>`__

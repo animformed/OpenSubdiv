@@ -26,35 +26,42 @@
 
 set(SHADER_FILES
      shader.hlsl
+     skyshader.hlsl
 )
 
 set(PLATFORM_LIBRARIES
     "${OSD_LINK_TARGET}"
     "${DXSDK_LIBRARIES}"
     "${PTEX_LIBRARY}"
+    "${ZLIB_LIBRARY}"
 )
 
 include_directories(
-    "${PROJECT_SOURCE_DIR}/opensubdiv"
-    "${PROJECT_SOURCE_DIR}/regression"
+    "${OPENSUBDIV_INCLUDE_DIR}"
     "${DXSDK_INCLUDE_DIR}"
     "${PTEX_INCLUDE_DIR}"
 )
 
+if (OPENCL_FOUND)
+    include_directories("${OPENCL_INCLUDE_DIRS}")
+endif()
+
 set(SOURCE_FILES
     dxPtexViewer.cpp
+    sky.cpp
 )
 
-_stringify("${SHADER_FILES}" INC_FILES)
+osd_stringify("${SHADER_FILES}" INC_FILES)
 
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-_add_possibly_cuda_executable(dxPtexViewer WIN32
+osd_add_possibly_cuda_executable(dxPtexViewer "examples" WIN32
     "${SOURCE_FILES}"
-    "${SHADER_FILES}"
     "${INC_FILES}"
     $<TARGET_OBJECTS:regression_common_obj>
-    $<TARGET_OBJECTS:examples_common_obj>
+    $<TARGET_OBJECTS:regression_far_utils_obj>
+    $<TARGET_OBJECTS:examples_common_dx11_obj>
+    $<TARGET_OBJECTS:examples_common_ptex_obj>
 )
 
 target_link_libraries(dxPtexViewer

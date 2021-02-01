@@ -23,7 +23,7 @@
 //
 
 #include "../osd/cpuD3D11VertexBuffer.h"
-#include "../osd/error.h"
+#include "../far/error.h"
 
 #include <D3D11.h>
 #include <cassert>
@@ -34,9 +34,7 @@ namespace OPENSUBDIV_VERSION {
 
 namespace Osd {
 
-CpuD3D11VertexBuffer::CpuD3D11VertexBuffer(int numElements,
-                                                 int numVertices,
-                                                 ID3D11Device *device)
+CpuD3D11VertexBuffer::CpuD3D11VertexBuffer(int numElements, int numVertices)
     : _numElements(numElements), _numVertices(numVertices),
       _d3d11Buffer(NULL), _cpuBuffer(NULL) {
 }
@@ -49,19 +47,25 @@ CpuD3D11VertexBuffer::~CpuD3D11VertexBuffer() {
 }
 
 CpuD3D11VertexBuffer *
-CpuD3D11VertexBuffer::Create(int numElements, int numVertices, ID3D11Device *device) {
+CpuD3D11VertexBuffer::Create(int numElements, int numVertices,
+                             ID3D11DeviceContext *deviceContext) {
 
     CpuD3D11VertexBuffer *instance =
-        new CpuD3D11VertexBuffer(numElements, numVertices, device);
+        new CpuD3D11VertexBuffer(numElements, numVertices);
+    ID3D11Device *device;
+    deviceContext->GetDevice(&device);
     if (instance->allocate(device)) return instance;
     delete instance;
     return NULL;
 }
 
 void
-CpuD3D11VertexBuffer::UpdateData(const float *src, int startVertex, int numVertices, void *param) {
+CpuD3D11VertexBuffer::UpdateData(const float *src, int startVertex,
+                                 int numVertices,
+                                 void * /*deviceContext*/) {
 
-    memcpy(_cpuBuffer + startVertex * _numElements, src, _numElements * numVertices * sizeof(float));
+    memcpy(_cpuBuffer + startVertex * _numElements, src,
+           _numElements * numVertices * sizeof(float));
 }
 
 int
@@ -92,7 +96,7 @@ CpuD3D11VertexBuffer::BindD3D11Buffer(ID3D11DeviceContext *deviceContext) {
                                     D3D11_MAP_WRITE_DISCARD, 0, &resource);
 
     if (FAILED(hr)) {
-        Error(OSD_D3D11_BUFFER_MAP_ERROR, "Fail to map buffer\n");
+        Far::Error(Far::FAR_RUNTIME_ERROR, "Fail to map buffer\n");
         return NULL;
     }
 
@@ -122,7 +126,7 @@ CpuD3D11VertexBuffer::allocate(ID3D11Device *device) {
     HRESULT hr;
     hr = device->CreateBuffer(&hBufferDesc, NULL, &_d3d11Buffer);
     if (FAILED(hr)) {
-        Error(OSD_D3D11_VERTEX_BUFFER_CREATE_ERROR,
+        Far::Error(Far::FAR_RUNTIME_ERROR,
                  "Fail in CreateBuffer\n");
         return false;
     }

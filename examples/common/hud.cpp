@@ -185,7 +185,7 @@ Hud::MouseClick(int x, int y)
     for (std::vector<PullDown>::iterator it = _pulldowns.begin();
          it != _pulldowns.end(); ++it) {
         if (hitTest(*it, x, y)) {
-            if (not it->open) {
+            if (! it->open) {
                 it->h = FONT_CHAR_HEIGHT;
                 it->h *= (int)it->labels.size();
                 it->open=true;
@@ -200,7 +200,7 @@ Hud::MouseClick(int x, int y)
                         it->callback(it->values[it->selected]);
                     }
                 } else {
-                    it->open=not it->open;
+                    it->open=! it->open;
                 }
             }
             _requiresRebuildStatic = true;
@@ -511,7 +511,11 @@ Hud::Rebuild(int width, int height, int framebufferWidth, int framebufferHeight)
         int sx = x;
         x = drawString(_staticVboSource, x, y, 1, 1, 1, it->label.c_str());
         char value[16];
-        snprintf(value, 16, " : %.2f", it->value);
+        if (it->intStep) {
+            snprintf(value, 16, " : %d", (int)it->value);
+        } else {
+            snprintf(value, 16, " : %.2f", it->value);
+        }
         drawString(_staticVboSource, x, y, 1, 1, 1, value);
 
         // new line
@@ -524,7 +528,7 @@ Hud::Rebuild(int width, int height, int framebufferWidth, int framebufferHeight)
             x = drawChar(_staticVboSource, x, y, 1, 1, 1, FONT_SLIDER_MIDDLE);
         }
         drawChar(_staticVboSource, x, y, 1, 1, 1, FONT_SLIDER_RIGHT);
-        int pos = (int)((it->value/float(it->max-it->min))*it->w);
+        int pos = int(((it->value-it->min)/(it->max-it->min))*float(it->w));
         drawChar(_staticVboSource, sx+pos, y, 1, 1, 0, FONT_SLIDER_CURSOR);
     }
     // draw pulldowns
@@ -552,10 +556,15 @@ Hud::Rebuild(int width, int height, int framebufferWidth, int framebufferHeight)
         }
     }
 
-    drawString(_staticVboSource, _windowWidth-80, _windowHeight-48, .5, .5, .5,
-               "\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f");
-    drawString(_staticVboSource, _windowWidth-80, _windowHeight-32, .5, .5, .5,
-               "\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f");
+    // draw the character cells corresponding to the logo
+    drawString(_staticVboSource, _windowWidth-128, _windowHeight-44, .5, .5, .5,
+               "\x06\x07\x08\x09");
+    drawString(_staticVboSource, _windowWidth-128, _windowHeight-28, .5, .5, .5,
+               "\x16\x17\x18\x19");
+    drawString(_staticVboSource, _windowWidth-92, _windowHeight-36, .5, .5, .5,
+               "\x0a\x0b\x0c\x0d");
+    drawString(_staticVboSource, _windowWidth-58, _windowHeight-36, .5, .5, .5,
+               "\x1a\x1b\x1c\x1d\x1e\x1f");
 }
 
 bool

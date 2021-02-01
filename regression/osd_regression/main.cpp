@@ -22,23 +22,7 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#if defined(__APPLE__)
-    #if defined(OSD_USES_GLEW)
-        #include <GL/glew.h>
-    #else
-        #include <OpenGL/gl3.h>
-    #endif
-    #define GLFW_INCLUDE_GL3
-    #define GLFW_NO_GLU
-#else
-    #include <stdlib.h>
-    #include <GL/glew.h>
-    #if defined(_WIN32)
-        // XXX Must include windows.h here or GLFW pollutes the global namespace
-        #define WIN32_LEAN_AND_MEAN
-        #include <windows.h>
-    #endif
-#endif
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window=0;
@@ -46,28 +30,14 @@ GLFWwindow* g_window=0;
 #include <stdio.h>
 #include <cassert>
 
-#include <far/meshFactory.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
+#include <opensubdiv/osd/cpuVertexBuffer.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/far/stencilTableFactory.h>
 
-#include <osd/vertex.h>
-#include <osd/cpuVertexBuffer.h>
-#include <osd/cpuComputeController.h>
-#include <osd/cpuComputeContext.h>
-
-#include <osd/cpuGLVertexBuffer.h>
-
-#ifdef OPENSUBDIV_HAS_CUDA
-#endif
-
-#ifdef OPENSUBDIV_HAS_OPENCL
-    #include <osd/clComputeContext.h>
-    #include <osd/clComputeController.h>
-    #include <osd/clGLVertexBuffer.h>
-    static cl_context g_clContext;
-    static cl_command_queue g_clQueue;
-    #include "../../examples/common/clInit.h" // XXXX TODO move file out of examples
-#endif
-
-#include "../../regression/common/hbr_utils.h"
+#include "../common/cmp_utils.h"
+#include "../common/hbr_utils.h"
+#include "../common/far_utils.h"
 
 //
 // Regression testing matching Osd to Hbr
@@ -82,18 +52,18 @@ GLFWwindow* g_window=0;
 //
 #define PRECISION 1e-6
 
+using namespace OpenSubdiv;    
+
 //------------------------------------------------------------------------------
 enum BackendType {
     kBackendCPU   = 0, // raw CPU
     kBackendCPUGL = 1, // CPU with GL-backed buffer
-    kBackendCL    = 2, // OpenCL
     kBackendCount
 };
 
 static const char* g_BackendNames[kBackendCount] = {
     "CPU",
     "CPUGL",
-    "CL",
 };
 
 static int g_Backend = -1;
@@ -145,21 +115,6 @@ struct xyzVV {
                  }
              }
 
-    void ApplyVertexEdit(OpenSubdiv::FarVertexEdit const & edit) {
-        const float *src = edit.GetEdit();
-        switch(edit.GetOperation()) {
-          case OpenSubdiv::FarVertexEdit::Set:
-            _pos[0] = src[0];
-            _pos[1] = src[1];
-            _pos[2] = src[2];
-            break;
-          case OpenSubdiv::FarVertexEdit::Add:
-            _pos[0] += src[0];
-            _pos[1] += src[1];
-            _pos[2] += src[2];
-            break;
-        }
-    }
     
     void     ApplyMovingVertexEdit(const OpenSubdiv::HbrMovingVertexEdit<xyzVV> &) { }
 
@@ -179,78 +134,60 @@ typedef OpenSubdiv::HbrHalfedge<xyzVV>       xyzhalfedge;
 typedef OpenSubdiv::HbrFaceOperator<xyzVV>   xyzFaceOperator;
 typedef OpenSubdiv::HbrVertexOperator<xyzVV> xyzVertexOperator;
 
-typedef OpenSubdiv::HbrMesh<OpenSubdiv::OsdVertex>     OsdHbrMesh;
-typedef OpenSubdiv::HbrVertex<OpenSubdiv::OsdVertex>   OsdHbrVertex;
-typedef OpenSubdiv::HbrFace<OpenSubdiv::OsdVertex>     OsdHbrFace;
-typedef OpenSubdiv::HbrHalfedge<OpenSubdiv::OsdVertex> OsdHbrHalfedge;
+typedef OpenSubdiv::Far::TopologyRefiner FarTopologyRefiner;
 
-//------------------------------------------------------------------------------
-// Returns true if a vertex or any of its parents is on a boundary
-bool 
-VertexOnBoundary( xyzvertex const * v ) {
-
-    if (not v)
-        return false;
-
-    if (v->OnBoundary())
-        return true;
-
-    xyzvertex const * pv = v->GetParentVertex();
-    if (pv)
-        return VertexOnBoundary(pv);
-    else {
-        xyzhalfedge const * pe = v->GetParentEdge();
-        if (pe) {
-              return VertexOnBoundary(pe->GetOrgVertex()) or
-                     VertexOnBoundary(pe->GetDestVertex());
-        } else {
-            xyzface const * pf = v->GetParentFace(), * rootf = pf;
-            while (pf) {
-                pf = pf->GetParent();
-                if (pf)
-                    rootf=pf;
-            }
-            if (rootf)
-                for (int i=0; i<rootf->GetNumVertices(); ++i)
-                    if (rootf->GetVertex(i)->OnBoundary())
-                        return true;
-        }
-    }
-    return false;
-}
 
 //------------------------------------------------------------------------------
 int 
-checkVertexBuffer( xyzmesh * hmesh, const float * vbData, int numElements, std::vector<int> const & remap) {
+checkVertexBuffer( 
+    const FarTopologyRefiner &refiner, xyzmesh * hmesh, 
+    const float * vbData, int numElements) {
 
     int count=0;
     float deltaAvg[3] = {0.0f, 0.0f, 0.0f},
           deltaCnt[3] = {0.0f, 0.0f, 0.0f};
 
-    int nverts = hmesh->GetNumVertices();
+    std::vector<xyzVV> hbrVertexData;
+    std::vector<bool>  hbrVertexOnBoundaryData;
+
+    // Only care about vertex on boundary conditions if the interpolate boundary
+    // is 'none'
+    std::vector<bool> *hbrVertexOnBoundaryPtr =
+        (hmesh->GetInterpolateBoundaryMethod() == 
+            xyzmesh::k_InterpolateBoundaryNone)
+        ? &hbrVertexOnBoundaryData
+        : NULL;
+
+
+    GetReorderedHbrVertexData(refiner, *hmesh, &hbrVertexData, 
+        hbrVertexOnBoundaryPtr);
+
+    //int nverts = hmesh->GetNumVertices();
+    int nverts = (int)hbrVertexData.size();
+
     for (int i=0; i<nverts; ++i) {
 
-        xyzvertex * hv = hmesh->GetVertex(i);
+        const float * ov = & vbData[ i * numElements ];
 
-        const float * ov = & vbData[ remap[ hv->GetID() ] * numElements ];
-
-        // boundary interpolation rules set to "none" produce "undefined" vertices on
-        // boundary vertices : far does not match hbr for those, so skip comparison.
-        if ( hmesh->GetInterpolateBoundaryMethod()==xyzmesh::k_InterpolateBoundaryNone and
-             VertexOnBoundary(hv) )
+        // boundary interpolation rules set to "none" produce "undefined" 
+        // vertices on boundary vertices : far does not match hbr for those,
+        // so skip comparison.
+        if (hbrVertexOnBoundaryPtr && (*hbrVertexOnBoundaryPtr)[i])
              continue;
 
+        const float *hbrPos = hbrVertexData[i].GetPos();
 
-        if ( hv->GetData().GetPos()[0] != ov[0] )
+
+        if ( hbrPos[0] != ov[0] )
             deltaCnt[0]++;
-        if ( hv->GetData().GetPos()[1] != ov[1] )
+        if ( hbrPos[1] != ov[1] )
             deltaCnt[1]++;
-        if ( hv->GetData().GetPos()[2] != ov[2] )
+        if ( hbrPos[2] != ov[2] )
             deltaCnt[2]++;
 
-        float delta[3] = { hv->GetData().GetPos()[0] - ov[0],
-                           hv->GetData().GetPos()[1] - ov[1],
-                           hv->GetData().GetPos()[2] - ov[2] };
+        float delta[3] = { hbrPos[0] - ov[0],
+                           hbrPos[1] - ov[1],
+                           hbrPos[2] - ov[2] };
 
         deltaAvg[0]+=delta[0];
         deltaAvg[1]+=delta[1];
@@ -259,9 +196,9 @@ checkVertexBuffer( xyzmesh * hmesh, const float * vbData, int numElements, std::
         float dist = sqrtf( delta[0]*delta[0]+delta[1]*delta[1]+delta[2]*delta[2]);
         if ( dist > PRECISION ) {
             printf("// HbrVertex<T> %d fails : dist=%.10f (%.10f %.10f %.10f)"
-                   " (%.10f %.10f %.10f)\n", i, dist, hv->GetData().GetPos()[0],
-                                                      hv->GetData().GetPos()[1],
-                                                      hv->GetData().GetPos()[2],
+                   " (%.10f %.10f %.10f)\n", i, dist, hbrPos[0],
+                                                      hbrPos[1],
+                                                      hbrPos[2],
                                                       ov[0],
                                                       ov[1],
                                                       ov[2] );
@@ -289,92 +226,84 @@ checkVertexBuffer( xyzmesh * hmesh, const float * vbData, int numElements, std::
 }
 
 //------------------------------------------------------------------------------
-static void 
-refine( xyzmesh * mesh, int maxlevel ) {
+static void
+buildStencilTable(
+    const FarTopologyRefiner &refiner,
+    Far::StencilTable const **vertexStencils,
+    Far::StencilTable const **varyingStencils)
+{
+    Far::StencilTableFactory::Options soptions;
+    soptions.generateOffsets = true;
+    soptions.generateIntermediateLevels = true;
 
-    for (int l=0; l<maxlevel; ++l ) {
-        int nfaces = mesh->GetNumFaces();
-        for (int i=0; i<nfaces; ++i) {
-            xyzface * f = mesh->GetFace(i);
-            if (f->GetDepth()==l)
-                f->Refine();
-        }
-    }
+    *vertexStencils = Far::StencilTableFactory::Create(refiner, soptions);
+
+    soptions.interpolationMode = Far::StencilTableFactory::INTERPOLATE_VARYING;
+    *varyingStencils = Far::StencilTableFactory::Create(refiner, soptions);
+}
+
+
+
+//------------------------------------------------------------------------------
+static int 
+checkMeshCPU( FarTopologyRefiner *refiner,
+              const std::vector<xyzVV>& coarseverts,
+              xyzmesh * refmesh) {
+
+    Far::StencilTable const *vertexStencils;
+    Far::StencilTable const *varyingStencils;
+    buildStencilTable(*refiner, &vertexStencils, &varyingStencils);
+
+    assert(coarseverts.size() == (size_t)refiner->GetNumVerticesTotal());
+    
+    Osd::CpuVertexBuffer * vb = 
+        Osd::CpuVertexBuffer::Create(3, refiner->GetNumVerticesTotal());
+    
+    vb->UpdateData( coarseverts[0].GetPos(), 0, (int)coarseverts.size() );
+    
+    Osd::CpuEvaluator::EvalStencils(
+        vb, Osd::BufferDescriptor(0, 3, 3),
+        vb, Osd::BufferDescriptor(refiner->GetLevel(0).GetNumVertices()*3, 3, 3),
+        vertexStencils);
+
+    int result = checkVertexBuffer(*refiner, refmesh, vb->BindCpuBuffer(), 
+        vb->GetNumElements());
+
+    delete vertexStencils;
+    delete varyingStencils;
+    delete vb;
+
+    return result;
 }
 
 //------------------------------------------------------------------------------
 static int 
-checkMeshCPU( OpenSubdiv::FarMesh<OpenSubdiv::OsdVertex>* farmesh,
-              const std::vector<float>& coarseverts,
-              xyzmesh * refmesh,
-              const std::vector<int>& remap) {
-                  
-    static OpenSubdiv::OsdCpuComputeController *controller = new OpenSubdiv::OsdCpuComputeController();
-    
-    OpenSubdiv::OsdCpuComputeContext *context = OpenSubdiv::OsdCpuComputeContext::Create(farmesh->GetSubdivisionTables(), farmesh->GetVertexEditTables());
-    
-    OpenSubdiv::OsdCpuVertexBuffer * vb = OpenSubdiv::OsdCpuVertexBuffer::Create(3, farmesh->GetNumVertices());
-    
-    vb->UpdateData( & coarseverts[0], 0, (int)coarseverts.size()/3 );
-    
-    controller->Refine( context, farmesh->GetKernelBatches(), vb );
-    
-    return checkVertexBuffer(refmesh, vb->BindCpuBuffer(), vb->GetNumElements(), remap);
-}
+checkMeshCPUGL(FarTopologyRefiner *refiner,
+               const std::vector<xyzVV>& coarseverts,
+               xyzmesh * refmesh) {
 
-//------------------------------------------------------------------------------
-static int 
-checkMeshCPUGL( OpenSubdiv::FarMesh<OpenSubdiv::OsdVertex>* farmesh,
-                const std::vector<float>& coarseverts,
-                xyzmesh * refmesh,
-                const std::vector<int>& remap) {
-                    
-    static OpenSubdiv::OsdCpuComputeController *controller = new OpenSubdiv::OsdCpuComputeController();
+    Far::StencilTable const *vertexStencils;
+    Far::StencilTable const *varyingStencils;
+    buildStencilTable(*refiner, &vertexStencils, &varyingStencils);
     
-    OpenSubdiv::OsdCpuComputeContext *context = OpenSubdiv::OsdCpuComputeContext::Create(farmesh->GetSubdivisionTables(), farmesh->GetVertexEditTables());
+    Osd::CpuGLVertexBuffer *vb = Osd::CpuGLVertexBuffer::Create(3, 
+        refiner->GetNumVerticesTotal());
     
-    OpenSubdiv::OsdCpuGLVertexBuffer * vb = OpenSubdiv::OsdCpuGLVertexBuffer::Create(3, farmesh->GetNumVertices());
-    
-    vb->UpdateData( & coarseverts[0], 0, (int)coarseverts.size()/3 );
-    
-    controller->Refine( context, farmesh->GetKernelBatches(), vb );
-    
-    return checkVertexBuffer(refmesh, vb->BindCpuBuffer(), vb->GetNumElements(), remap);
-}
+    vb->UpdateData( coarseverts[0].GetPos(), 0, (int)coarseverts.size() );
 
-//------------------------------------------------------------------------------
-static int 
-checkMeshCL( OpenSubdiv::FarMesh<OpenSubdiv::OsdVertex>* farmesh,
-             const std::vector<float>& coarseverts,
-             xyzmesh * refmesh,
-             const std::vector<int>& remap ) {
+    Osd::CpuEvaluator::EvalStencils(
+        vb, Osd::BufferDescriptor(0, 3, 3),
+        vb, Osd::BufferDescriptor(refiner->GetLevel(0).GetNumVertices()*3, 3, 3),
+        vertexStencils);
 
-#ifdef OPENSUBDIV_HAS_OPENCL
+    int result = checkVertexBuffer(*refiner, refmesh, 
+        vb->BindCpuBuffer(), vb->GetNumElements());
 
-    static OpenSubdiv::OsdCLComputeController *controller = new OpenSubdiv::OsdCLComputeController(g_clContext, g_clQueue);
-    
-    OpenSubdiv::OsdCLComputeContext *context = OpenSubdiv::OsdCLComputeContext::Create(farmesh->GetSubdivisionTables(), farmesh->GetVertexEditTables(), g_clContext);
-    
-    OpenSubdiv::OsdCLGLVertexBuffer * vb = OpenSubdiv::OsdCLGLVertexBuffer::Create(3, farmesh->GetNumVertices(), g_clContext);
-    
-    vb->UpdateData( & coarseverts[0], 0, (int)coarseverts.size()/3, g_clQueue );
-    
-    controller->Refine( context, farmesh->GetKernelBatches(), vb );
-
-    // read data back from CL buffer
-    size_t dataSize = vb->GetNumVertices() * vb->GetNumElements();
-    float* data = new float[dataSize];
-    
-    clEnqueueReadBuffer (g_clQueue, vb->BindCLBuffer(g_clQueue), CL_TRUE, 0, dataSize * sizeof(float), data, 0, NULL, NULL);
-    
-    int result = checkVertexBuffer(refmesh, data, vb->GetNumElements(), remap);
-    
-    delete[] data;
+    delete vertexStencils;
+    delete varyingStencils;
+    delete vb;
     
     return result;
-#else
-    return 0;
-#endif
 }
 
 //------------------------------------------------------------------------------
@@ -385,28 +314,26 @@ checkMesh( char const * msg, std::string const & shape, int levels, Scheme schem
 
     printf("- %s (scheme=%d)\n", msg, scheme);
 
-    xyzmesh * refmesh = simpleHbr<xyzVV>(shape.c_str(), scheme, 0);
+    xyzmesh * refmesh = 
+        interpolateHbrVertexData<xyzVV>(shape.c_str(), scheme, levels);
 
-    refine( refmesh, levels );
+    std::vector<xyzVV> farVertexData;
 
-
-    std::vector<float> coarseverts;
-
-    OsdHbrMesh * hmesh = simpleHbr<OpenSubdiv::OsdVertex>(shape.c_str(), scheme, coarseverts);
-
-    OpenSubdiv::FarMeshFactory<OpenSubdiv::OsdVertex> meshFactory(hmesh, levels);
-
-    OpenSubdiv::FarMesh<OpenSubdiv::OsdVertex> * farmesh = meshFactory.Create();
-
-    std::vector<int> remap = meshFactory.GetRemappingTable();
+    FarTopologyRefiner *refiner =
+        InterpolateFarVertexData(shape.c_str(), scheme, levels, 
+            farVertexData);
 
     switch (backend) {
-        case kBackendCPU   : result = checkMeshCPU(farmesh, coarseverts, refmesh, remap); break;
-        case kBackendCPUGL : result = checkMeshCPUGL(farmesh, coarseverts, refmesh, remap); break;
-        case kBackendCL    : result = checkMeshCL(farmesh, coarseverts, refmesh, remap); break;
+        case kBackendCPU:
+            result = checkMeshCPU(refiner, farVertexData, refmesh); 
+            break;
+        case kBackendCPUGL: 
+            result = checkMeshCPUGL(refiner, farVertexData, refmesh); 
+            break;
     }
 
-    delete hmesh;
+    delete refmesh;
+    delete refiner;
 
     return result;
 }
@@ -415,18 +342,6 @@ checkMesh( char const * msg, std::string const & shape, int levels, Scheme schem
 int checkBackend(int backend, int levels) {
 
     printf("*** checking backend : %s\n", g_BackendNames[backend]);
-
-    if (backend == kBackendCL) {
-#ifdef OPENSUBDIV_HAS_OPENCL
-        if (initCL(&g_clContext, &g_clQueue) == false) {
-            printf("  Cannot initialize OpenCL, skipping...\n");
-            return 0;
-        }
-#else
-        printf("  No OpenCL available, skipping...\n");
-        return 0;
-#endif
-    }
 
     int total = 0;
 
@@ -449,10 +364,13 @@ int checkBackend(int backend, int levels) {
 #define test_catmark_tent
 #define test_catmark_tent_creases0
 #define test_catmark_tent_creases1
-#define test_catmark_square_hedit0
-#define test_catmark_square_hedit1
-#define test_catmark_square_hedit2
-#define test_catmark_square_hedit3
+
+
+// hedits don't work.
+//#define test_catmark_square_hedit0
+//#define test_catmark_square_hedit1
+//#define test_catmark_square_hedit2
+//#define test_catmark_square_hedit3
 
 #define test_loop_triangle_edgeonly
 #define test_loop_triangle_edgecorner
@@ -627,13 +545,6 @@ int checkBackend(int backend, int levels) {
     total += checkMesh( "test_bilinear_cube", bilinear_cube, levels, kBilinear, backend );
 #endif
 
-
-    if (backend == kBackendCL) {
-#ifdef OPENSUBDIV_HAS_OPENCL
-        uninitCL(g_clContext, g_clQueue);
-#endif
-    }
-
     return total;
 }
 
@@ -658,26 +569,26 @@ usage(char ** argv) {
 static void 
 parseArgs(int argc, char ** argv) {
 
-    for (int i=1; i<argc; ++i) {
-        if (not strcmp(argv[i],"-compute")) {
+    for (int argi=1; argi<argc; ++argi) {
+        if (! strcmp(argv[argi],"-compute")) {
         
             const char * backend = NULL;
             
-            if (i<(argc-1))
-                backend = argv[++i];
+            if (argi<(argc-1))
+                backend = argv[++argi];
 
-            if (not strcmp(backend, "all")) {
+            if (! strcmp(backend, "all")) {
               g_Backend = -1;
             } else {
               bool found = false;
               for (int i = 0; i < kBackendCount; ++i) {
-                if (not strcmp(backend, g_BackendNames[i])) {
+                if (! strcmp(backend, g_BackendNames[i])) {
                   g_Backend = i;
                   found = true;
                   break;
                 }
               }
-              if (not found) {
+              if (! found) {
                 printf("-compute : must be 'all' or one of: ");
                 for (int i = 0; i < kBackendCount; ++i)
                     printf("%s ", g_BackendNames[i]);
@@ -685,8 +596,8 @@ parseArgs(int argc, char ** argv) {
                 exit(0);
               }
             }
-        } else if ( (not strcmp(argv[i],"-help")) or
-                    (not strcmp(argv[i],"-h")) ) {
+        } else if ( (! strcmp(argv[argi],"-help")) ||
+                    (! strcmp(argv[argi],"-h")) ) {
             usage(argv);
             exit(1);
         } else {
@@ -694,6 +605,12 @@ parseArgs(int argc, char ** argv) {
             exit(0);
         }
     }
+}
+
+void _glfw_error_callback(int error, const char *description)
+{
+    printf("GLFW reported error %d: %s\n",
+            error, description);
 }
 
 //------------------------------------------------------------------------------
@@ -705,8 +622,11 @@ main(int argc, char ** argv) {
     // "-backend <name>" tests one backend.
     parseArgs(argc, argv);
 
+    glfwSetErrorCallback(_glfw_error_callback);
+
     // Make sure we have an OpenGL context : create dummy GLFW window
-    if (not glfwInit()) {
+    if (! glfwInit()) {
+        printf("DISPLAY set to '%s'\n", getenv("DISPLAY"));
         printf("Failed to initialize GLFW\n");
         return 1;
     }
@@ -714,19 +634,14 @@ main(int argc, char ** argv) {
     int width=10, height=10;
     
     static const char windowTitle[] = "OpenSubdiv OSD regression";
-    if (not (g_window=glfwCreateWindow(width, height, windowTitle, NULL, NULL))) {
+    if (! (g_window=glfwCreateWindow(width, height, windowTitle, NULL, NULL))) {
         printf("Failed to open window.\n");
         glfwTerminate();
         return 1;
     }
     glfwMakeContextCurrent(g_window);
     
-#if defined(OSD_USES_GLEW)
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. error = %d\n", r);
-        exit(1);
-    }
-#endif
+    OpenSubdiv::internal::GLLoader::applicationInitializeGL();
 
     printf("precision : %f\n",PRECISION);
 

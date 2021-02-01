@@ -22,63 +22,44 @@
 #   language governing permissions and limitations under the Apache License.
 #
 
-# *** ptexViewer ***
+# *** glPtexViewer ***
 
 set(SHADER_FILES
      shader.glsl
      shader_gl3.glsl
      skyshader.glsl
-     imageshader.glsl
 )
-
-list(APPEND PLATFORM_LIBRARIES
-    "${OSD_LINK_TARGET}"
-    "${OPENGL_LIBRARY}"
-    "${GLFW_LIBRARIES}"
-    "${PTEX_LIBRARY}"
-)
-
-if (APPLE)
-    list(APPEND PLATFORM_LIBRARIES -lz)
-endif()
 
 include_directories(
-    "${PROJECT_SOURCE_DIR}/opensubdiv"
-    "${PROJECT_SOURCE_DIR}/regression"
+    "${OPENSUBDIV_INCLUDE_DIR}"
+    "${OPENGL_LOADER_INCLUDE_DIRS}"
     "${GLFW_INCLUDE_DIR}"
     "${PTEX_INCLUDE_DIR}"
 )
 
-if ( GLEW_FOUND )
-    include_directories("${GLEW_INCLUDE_DIR}")
-    list(APPEND PLATFORM_LIBRARIES "${GLEW_LIBRARY}")
-endif()
+list(APPEND PLATFORM_LIBRARIES
+    "${OSD_LINK_TARGET}"
+    "${OPENGL_LOADER_LIBRARIES}"
+    "${GLFW_LIBRARIES}"
+    "${PTEX_LIBRARY}"
+    "${ZLIB_LIBRARY}"
+)
 
 if( OPENCL_FOUND )
     include_directories("${OPENCL_INCLUDE_DIRS}")
 endif()
 
-# optional dependency - enables screenshots
-find_package(PNG)
-if (PNG_FOUND)
-    include_directories("${PNG_INCLUDE_DIRS}")
-    list(APPEND PLATFORM_LIBRARIES "${PNG_LIBRARIES}")
-    add_definitions(-DOPENSUBDIV_HAS_PNG)
-endif()
-
-#-------------------------------------------------------------------------------
-
-_stringify("${SHADER_FILES}" INC_FILES)
+osd_stringify("${SHADER_FILES}" INC_FILES)
 
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-#-------------------------------------------------------------------------------
-_add_glfw_executable(glPtexViewer
+osd_add_glfw_executable(glPtexViewer "examples"
     glPtexViewer.cpp
     "${SHADER_FILES}"
     "${INC_FILES}"
     $<TARGET_OBJECTS:regression_common_obj>
-    $<TARGET_OBJECTS:examples_common_obj>
+    $<TARGET_OBJECTS:examples_common_gl_obj>
+    $<TARGET_OBJECTS:examples_common_ptex_obj>
 )
 
 target_link_libraries(glPtexViewer

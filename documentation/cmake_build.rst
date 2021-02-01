@@ -22,15 +22,13 @@
      language governing permissions and limitations under the Apache License.
 
 
-Building with Cmake
+Building with CMake
 -------------------
 
 .. contents::
    :local:
    :backlinks: none
 
-
-Information on how to build OpenSubdiv
 
 ----
 
@@ -39,11 +37,11 @@ Overview
 
 Assuming that you have `cloned <getting_started.html>`__ the source repository
 and selected an appropriate release branch, the following instructions will
-walk you through the Cmake and configuration and build process.
+walk you through the CMake and configuration and build process.
 
-Cmake is a cross-platform, open-source build system. Cmake controls the compilation
+CMake is a cross-platform, open-source build system. CMake controls the compilation
 process using platform independent configuration files in order to generate
-makefiles and workspaces that are native to the platform of choice.
+Makefiles and workspaces that are native to the platform of choice.
 
 The process involves the following steps:
 
@@ -56,7 +54,7 @@ The process involves the following steps:
 Step 1: Dependencies
 ====================
 
-Cmake will adapt the build based on which dependencies have been successfully
+CMake will adapt the build based on which dependencies have been successfully
 discovered and will disable certain features and code examples accordingly.
 
 Please refer to the documentation of each of the dependency packages for specific
@@ -64,7 +62,7 @@ build and installation instructions.
 
 Required
 ________
-    - `cmake <http://www.cmake.org/>`__ version 2.8
+    - `CMake <http://www.cmake.org/>`__ version 2.8
 
 Optional
 ________
@@ -72,7 +70,6 @@ ________
     - `Ptex <http://ptex.us/>`__ (support features for ptex textures and the
       ptexViewer example)
     - `Zlib <http://www.zlib.net/>`__ (required for Ptex under Windows)
-    - `GLEW <http://glew.sourceforge.net/>`__
     - `CUDA <http://www.nvidia.com/object/cuda_home_new.html>`__
     - `TBB <http://www.threadingbuildingblocks.org/>`__
     - `OpenCL <http://www.khronos.org/opencl/>`__
@@ -80,8 +77,8 @@ ________
     - `GLFW <https://github.com/glfw/glfw>`__ (required for standalone examples
       and some regression tests)
     - `Docutils <http://docutils.sourceforge.net/>`__ (required for reST-based documentation)
-    - `Python Pygments <http://www.pygments.org/>`__ (required for Docutils reST styling)
-    - `Doxygen <www.doxygen.org/>`__
+    - `Python Pygments <http://pygments.org/>`__ (required for Docutils reST styling)
+    - `Doxygen <http://www.doxygen.org/>`__
 
 ----
 
@@ -98,7 +95,7 @@ the custom CMake modules in the OpenSubdiv/cmake/ folder.
 Useful Build Options
 ____________________
 
-The following configuration arguments can be passed to the cmake command line.
+The following configuration arguments can be passed to the CMake command line.
 
 .. code:: c++
 
@@ -109,9 +106,7 @@ The following configuration arguments can be passed to the cmake command line.
 
    -DCUDA_TOOLKIT_ROOT_DIR=[path to CUDA]
    -DPTEX_LOCATION=[path to Ptex]
-   -DGLEW_LOCATION=[path to GLEW]
    -DGLFW_LOCATION=[path to GLFW]
-   -DMAYA_LOCATION=[path to Maya]
    -DTBB_LOCATION=[path to Intel's TBB]
    -DICC_LOCATION=[path to Intel's C++ Studio XE]
 
@@ -119,7 +114,6 @@ The following configuration arguments can be passed to the cmake command line.
    -DNO_EXAMPLES=1   // disable examples build
    -DNO_TUTORIALS=1  // disable tutorials build
    -DNO_REGRESSION=1 // disable regression tests build
-   -DNO_MAYA=1       // disable Maya plugin build
    -DNO_PTEX=1       // disable PTex support
    -DNO_DOC=1        // disable documentation build
    -DNO_OMP=1        // disable OpenMP
@@ -132,12 +126,12 @@ The following configuration arguments can be passed to the cmake command line.
 Environment Variables
 _____________________
 
-The paths to Maya, Ptex, GLFW, GLEW and other dependencies can also be specified
+The paths to Ptex, GLFW, other dependencies can also be specified
 through the following environment variables:
 
 .. code:: c++
 
-   MAYA_LOCATION, PTEX_LOCATION, GLFW_LOCATION, GLEW_LOCATION
+   PTEX_LOCATION, GLFW_LOCATION
 
 Automated Script
 ________________
@@ -166,13 +160,11 @@ build that can be run in GitShell :
 
     # Replace the ".." with a full path to the root of the OpenSubdiv source tree if necessary
     "c:/Program Files (x86)/CMake 2.8/bin/cmake.exe" \
-        -G "Visual Studio 10 Win64" \
-        -D "GLEW_LOCATION:string=c:/Program Files/glew-1.9.0" \
+        -G "Visual Studio 15 2017 Win64" \
         -D "GLFW_LOCATION:string=c:/Program Files/glfw-2.7.7.bin.WIN64" \
         -D "OPENCL_INCLUDE_DIRS:string=c:/ProgramData/NVIDIA Corporation/NVIDIA GPU Computing SDK 4.2/OpenCL/common/inc" \
         -D "_OPENCL_CPP_INCLUDE_DIRS:string=c:/ProgramData/NVIDIA Corporation/NVIDIA GPU Computing SDK 4.2/OpenCL/common/inc" \
         -D "OPENCL_LIBRARIES:string=c:/ProgramData/NVIDIA Corporation/NVIDIA GPU Computing SDK 4.2/OpenCL/common/lib/x64/OpenCL.lib" \
-        -D "MAYA_LOCATION:string=c:/Program Files/Autodesk/Maya2013.5" \
         -D "PTEX_LOCATION:string=c:/Users/opensubdiv/demo/src/ptex/x64" \
         ..
 
@@ -185,7 +177,7 @@ build that can be run in GitShell :
 
 .. container:: impnotip
 
-   * **Important**
+   **Important**
 
       Notice that the following scripts start by **recursively removing** the *../build/* and
       *../inst/* directories. Make sure you modify them to suit your build workflow.
@@ -198,14 +190,13 @@ Here is a similar script for \*Nix-based platforms:
     cd ..; rm -rf build/ inst/; mkdir build; cd build;
     echo "*** Running cmake"
     cmake -DPTEX_LOCATION=/home/opensubdiv/dev/opensource/ptex/install \
-          -DGLEW_LOCATION=/home/opensubdiv/dev/opensource/glew/glew-1.9.0 \
           -DGLFW_LOCATION=/home/opensubdiv/dev/opensource/glfw/build \
           -DDOXYGEN_EXECUTABLE=/home/opensubdiv/dev/opensource/doxygen/inst/bin/doxygen \
           -DCMAKE_INSTALL_PREFIX=../inst \
           -DCMAKE_BUILD_TYPE=Debug \
           ..
 
-Here is a similar script for OSX:
+Here is a similar script for macOS:
 
 .. code:: c++
 
@@ -259,27 +250,18 @@ CMake provides a cross-platform command-line build:
 
     cmake --build . --target install --config Release
 
-Alternatively, you can native toolkits to launch the build. The steps differ for each OS:
+Alternatively, you can use native toolkits to launch the build. The steps differ for each OS:
 
     * *Windows* :
-        launch VC++ with the solution generated by cmake in your build directory.
+        launch VC++ with the solution generated by CMake in your build directory.
 
-    * *OSX* :
-        run *make* in the build directory
+    * *macOS* :
+        launch Xcode with the xcodeproj generated by CMake in your build directory
 
     * *\*Nix* :
         | run *make* in your build directory
         | - use the *clean* target to remove previous build results
         | - use *VERBOSE=1* for verbose build output
-
-.. container:: notebox
-
-   **Note**
-       We recommend against using CMake's Xcode project generator (-G "Xcode") on OSX, as it seems to
-       generate some dependencies incorrectly. We recommend instead reverting to Makefiles on OSX, and
-       launching *make*, instead of *xcodebuild* to execute the build (make sure to install the command
-       line tools in Xcode)
-
 
 ----
 
@@ -309,3 +291,40 @@ useful target names:
       | Builds Doxygen documentation
       |
 
+
+----
+
+Compiling & Linking an OpenSubdiv Application
+=============================================
+
+Here are example commands for building an OpenSubdiv application on several architectures:
+
+**Linux**
+::
+
+  g++ -I$OPENSUBDIV/include -c myapp.cpp
+  g++ myapp.o -L$OPENSUBDIV/lib -losdGPU -losdCPU -o myapp
+
+**macOS**
+::
+
+  g++ -I$OPENSUBDIV/include -c myapp.cpp
+  g++ myapp.o -L$OPENSUBDIV/lib -losdGPU -losdCPU -o myapp
+  install_name_tool -add_rpath $OPENSUBDIV/lib myapp
+
+(On 64-bit OS-X: add ``-m64`` after each ``g++``.)
+
+**Windows**
+::
+
+  cl /nologo /MT /TP /DWIN32 /I"%OPENSUBDIV%\include" -c myapp.cpp
+  link /nologo /out:myapp.exe /LIBPATH:"%OPENSUBDIV%\lib" libosdGPU.lib libosdCPU.lib myapp.obj
+
+
+.. container:: impnotip
+
+    **Note:**
+
+    HBR uses the offsetof macro on a templated struct, which appears to spurriously set off a
+    warning in both gcc and Clang. It is recommended to turn the warning off with the
+    *-Wno-invalid-offsetof* flag.

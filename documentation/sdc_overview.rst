@@ -29,66 +29,54 @@ Sdc Overview
    :local:
    :backlinks: none
 
-.. image:: images/api_layers_3_0.png
-   :width: 100px
-   :target: images/api_layers_3_0.png
-
 Subdivision Core (Sdc)
 ======================
 
 Sdc is the lowest level layer in OpenSubdiv.  Its intent is to separate
 the core subdivision details from any particular representation of a mesh
-(it was previously bound to Hbr) to facilate other classes both internal
-and external to OpenSubdiv generating consistent results.
+(it was previously bound to Hbr) to facilitate the generation of consistent
+results with other mesh representations, both internal and external to
+OpenSubdiv.
 
 The functionality can be divided roughly into three sections:
 
     * types, traits and options for the supported subdivision schemes
     * computations required to support semi-sharp creasing
-    * computing mask weights for subdivided vertices for all schemes
+    * computations for mask weights of subdivided vertices for all schemes
 
-Overall the approach taken was to extract the functionality at as low a
-level as possible.  In some cases they are not far from being simple global
-functions.  The intent was to start at a low level and build any higher
+For most common usage, familiarity with only the first of these is necessary --
+primarily the use of public types and constants for the choice of subdivision
+scheme and its associated options.  The latter two provide the basis for a
+more comprehensive implementation of subdivision, which requires considerably
+more understanding and effort.
+
+Overall, the approach was to extract the functionality at the lowest level
+possible.  In some cases, the implementation is not far from being simple
+global functions.  The intent was to start at a low level and build any higher
 level functionality as needed.  What exists now is functional for ongoing
 development and anticipated needs within OpenSubdiv for the near future.
 
-Its also worth noting that the intent of Sdc is to provide the building
-blocks for OpenSubdiv and its clients to efficiently process the specific
-set of subdivision schemes that are supported.  It is not intended to be
-a general framework for defining customized subdivision schemes.
-
-
-.. container:: notebox
-
-    **Alpha Issues**
-
-    Warnings of change:
-
-        * note change in creasing method from *"Normal"* to *"Uniform"* and
-          related use of *"Uniform"*
-        * all boundary interpolation choices in *Sdc::Options* are subject to change
-
-    Other changes under consideration:
-
-        * *<MASK>* face-weights to support face-centers and/or original vertices
-        * merging *Sdc::TypeTraits<T>* into *Sdc::Scheme<T>* as static methods
-        * static initialization of creasing constants (for smooth and
-          infinitely sharp)
-        * how to document template paremeter interfaces, e.g. *<MASK>*,
-          *<FACE>*, etc.?
+The intent of Sdc is to provide the building blocks for OpenSubdiv and its
+clients to efficiently process the specific set of supported subdivision
+schemes.  It is not intended to be a general framework for
+defining customized subdivision schemes.
 
 
 Types, Traits and Options
 =========================
 
-The most basic type is the enum *Sdc::Type* that identifies the fixed set of
+The most basic type is the enum *Sdc::SchemeType* that identifies the fixed set of
 subdivision schemes supported by OpenSubdiv:  *Bilinear*, *Catmark* and *Loop*.
 With this alone, we intend to avoid all dynamic casting issues related to the
 scheme by simply adding members to the associated subclasses for inspection.
-In addition to the type enum itself, a class defining a set of
-*TypeTraits<Type TYPE>* for each scheme is provided along with the required
-specializations for each scheme.
+
+In addition to the type enum itself, a class defining a fixed set of traits
+associated with each scheme is provided.  While these traits are available as
+static methods in the interface of a class supporting more functionality for each
+scheme (to be described shortly), the *SchemeTypeTraits* provide queries of the
+traits for a variable of type *Sdc::SchemeType* -- enabling parameterization
+of code by the value of a trait without templates or virtual inheritance (a
+simple internal table of traits is constructed and trivially indexed).
 
 The second contribution is the collection of all variations in one place that can
 be applied to the subdivision schemes, i.e. the boundary interpolation rules,
@@ -101,9 +89,16 @@ into a single object (the equivalent of an integer in this case) that are passed
 around to other Sdc classes and/or methods and are expected to be used at a higher
 level both within OpenSubdiv and externally.  By aggregating the options and
 passing them around as a group, it allows us to extend the set easily in future
-without the need to rewire a lot of interfaces to accomodate the new choice.
-Clients can enables new choices at the highest level and be assured that they will
+without the need to rewire a lot of interfaces to accommodate the new choice.
+Clients can enable new choices at the highest level and be assured that they will
 propagate to the lowest level where they are relevant.
+
+Unlike other "options" structs used elsewhere to specify variations of a
+particular method, *Sdc::Options* defines all options that affect the shape of
+the underlying limit surface of a subdivision mesh.  Other operations at higher
+levels in the library may have options that approximate the shape and so create
+a slightly different appearance, but *Sdc::Options* is a fundamental part of
+the definition of the true limit surface.
 
 
 Creasing support
@@ -114,16 +109,16 @@ independent of the subdivision scheme, the goal in Sdc was to encapsulate all
 related creasing functionality in a similarly independent manner.  Computations
 involving sharpness values are also much less dependent on topology -- there
 are vertices and edges with sharpness values, but knowledge of faces or boundary
-edges is not required -- so the complexity of topological neighborhoods required
+edges is not required, -- so the complexity of topological neighborhoods required
 for more scheme-specific functionality is arguably not necessary here.
 
 Creasing computations have been provided as methods defined on a Crease class
 that is constructed with a set of Options.  Its methods typically take sharpness
-values as inputs and compute one or a corresponding set of new sharpness values
+values as inputs and compute a corresponding set of sharpness values
 as a result.  For the "Uniform" creasing method (previously known as *"Normal"*),
 the computations may be so trivial as to question whether such an interface is
-worth it, but for "Chaikin" or other schemes in future that are non-trivial, the
-benefits should be clear.  Functionality is divided between both uniform and
+worth it, but for "Chaikin" or other schemes in the future that are non-trivial,
+the benefits should be clear.  Functionality is divided between both uniform and
 non-uniform, so clients have some control over avoiding unnecessary overhead,
 e.g. non-uniform computations typically require neighboring sharpness values
 around a vertex, while uniform does not.
@@ -156,22 +151,23 @@ for temporary use.
 Scheme-specific support
 =======================
 
-While the TypeTraits class provides traits for each subdivision scheme supported
-by OpenSubdiv (i.e. *Bilinear*, *Catmark* and *Loop*), the Scheme class
-provides methods for computing the various sets of weights used to compute new
-vertices resulting from subdivision.  The collection of weights used to compute
+While the SchemeTypeTraits class provides traits for each subdivision scheme
+supported by OpenSubdiv (i.e. *Bilinear*, *Catmark* and *Loop*), the Scheme class
+provides these more directly, Additionally, the Scheme class provides methods
+for computing the various sets of weights used to compute new vertices resulting
+from subdivision.  The collection of weights used to compute
 a single vertex at a new subdivision level is typically referred to as a
 *"mask"*.  The primary purpose of the Scheme class is to provide such masks in a
 manner both general and efficient.
 
 Each subdivision scheme has its own values for its masks, and each are provided
-as specializations of the template class *Scheme<Type TYPE>*. The intent is to
+as specializations of the template class *Scheme<SchemeType TYPE>*. The intent is to
 minimize the amount of code specific to each scheme.
 
 The computation of mask weights for subdivided vertices is the most significant
 contribution of Sdc. The use of semi-sharp creasing with each
 non-linear subdivision scheme complicates what are otherwise simple
-masks detemined solely by the topology, and packaging that functionality to
+masks determined solely by the topology, and packaging that functionality to
 achieve both the generality and efficiency desired has been a challenge.
 
 Mask queries are defined in the *Scheme* class template, which has
@@ -226,10 +222,8 @@ interior case that often dominates.  More on that in the details of the Scheme c
 Given that most of the complexity has been moved into the template parameters for
 the mask queries, the Scheme class remains fairly simple.  Like the Crease class,
 it is instantiated with a set of Options to avoid them cluttering the interface.
-It is currently little more than three methods for the mask queries for each vertex
-type. The set of masks may need to be extended in future to include limit masks
-and (potentially) masks for face-varying data sets (whose neighborhoods may vary in
-their definition).
+It is currently little more than a few methods for the limit and refinement masks
+for each vertex type, plus the few fixed traits of the scheme as static methods.
 
 The mask queries have been written in a way that greatly simplifies the
 specializations required for each scheme. The generic implementation for both
@@ -248,7 +242,7 @@ The <FACE>, <EDGE> and <VERTEX> interfaces
 
 Mask queries require an interface to a topological neighborhood, currently
 labeled **FACE**, **EDGE** and **VERTEX**. This naming potentially implies more
-generality than intended as such classes are only expected to provide the
+generality than intended, as such classes are only expected to provide the
 methods required of the mask queries to compute its associated weights.  While
 all methods must be defined, some may rarely be invoked, and the client has
 considerable flexibility in the implementation of these: they can defer some
@@ -293,8 +287,8 @@ The information requested of these classes in the three mask queries is as follo
 
 The latter should not be surprising given the dependencies noted above.  There
 are also a few more to consider for future use, e.g. whether the **EDGE** or
-**VERTEX** is manifold or not.  In most cases additional information can be
-provided to the mask queries (i.e. pre-determined Rules) and most of the child
+**VERTEX** is manifold or not.  In most cases, additional information can be
+provided to the mask queries (i.e. pre-determined Rules), and most of the child
 sharpness values are not necessary. The most demanding situation is a
 fractional crease that decays to zero -- in which case all parent and child
 sharpness values in the neighborhood are required to determine the proper
@@ -308,10 +302,10 @@ Methods dealing with the collections of weights defining a mask are typically
 parameterized by a *MASK* template parameter that contains the weights.  The set of
 mask weights is currently divided into vertex-weights, edge-weights and
 face-weights -- consistent with previous usage in OpenSubdiv and providing some
-useful correllation between the full set of weights and topology.  The
+useful correlation between the full set of weights and topology.  The
 vertex-weights refer to parent vertices incident the parent component from which a
 vertex originated, the edge-weights the vertices opposite incident edges of the
-parent, and the face-weights the center of indicent parent faces.  Note the latter
+parent, and the face-weights the center of incident parent faces.  Note the latter
 is **NOT** in terms of vertices of the parent but potentially vertices in the child
 originating from faces of the parent.  This has been done historically in
 OpenSubdiv but is finding less use -- particularly when it comes to providing
@@ -326,9 +320,9 @@ So the mask queries require the following capabilities:
 
 through a set of methods required of all *MASK* classes. Since the maximum
 number of weights is typically known based on the topology, usage within Vtr,
-*Far* or *Hbr* is expected to simply define buffers on the stack or in
-pre-allocated tables to be partitioned into the three sets of weights on
-construction of a *MASK* and then populated by the mask queries.
+*Far* or *Hbr* is expected to simply define buffers on the stack. Another
+option is to utilize pre-allocated tables, partitioned into the three sets 
+of weights on construction of a *MASK*, and populated by the mask queries.
 
 A potentially useful side-effect of this is that the client can define their
 weights to be stored in either single or double-precision. With that

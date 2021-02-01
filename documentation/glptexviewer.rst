@@ -35,21 +35,14 @@ SYNOPSIS
 .. parsed-literal:: 
    :class: codefhead
 
-   **glPtexViewer** 
-   [**-e** *environment map*]
-   [**-d** *HDR diffuse map*]
-   [**-s** *HDR specular map*]
-   [**-y**]
-   [**--disp** *displacement scale*]
-   [**--bump** *bump scale*]
-   [**-l** *isolation level*] 
-   [**-c** *animation loops*] 
-   [**-f**] 
-   *ptex color file*
-   *ptex displacement file*
-   *ptex occlusion file*
-   *ptex specular file*
-   *objfile(s)*
+   **glPtexViewer** [**-f**] [**-yup**] [**-u**] [**-a**] [**-l** *isolation level*] [**-c** *animation loops*]
+       [**-e** *environment map*] [**-d** *HDR diffuse map*] [**-s** *HDR specular map*]
+       [**--disp** *displacement scale*] [**--bump** *bump scale*]
+       *ptex color file*
+       *ptex displacement file*
+       *ptex occlusion file*
+       *ptex specular file*
+       *objfile(s)*
 
 DESCRIPTION
 ===========
@@ -65,6 +58,10 @@ are available to experiment with the algorithms.
 
 OPTIONS
 =======
+
+See the description of the
+`common comand line options <code_examples.html#common-command-line-options>`__
+for the subset of common options supported here.
 
 **-e** *environment map*
   A low dynamic range spherical environment map used as a background. Ideally,
@@ -83,41 +80,22 @@ OPTIONS
 **--bump** *displacement scale*
   A scalar multiplier for the shader bump values.
 
-**-y**
-  Swap Z-up geometry to Y-UP.
-
-**-l** *isolation level*
-  Select the desired isolation level of adaptive feature isolation. This can be 
-  useful when trying to load large pieces of geometry.
-
-**-c** *animation frequency*
-  Number of repetitions of the animtion loop (default=0 is infinite)
-
-**-f**
-  Launches the application in full-screen mode (if is supported by GLFW on the
-  OS)
-
 *ptex color file*
   A ptex file containing RGB channels read as material albedo color.
   
 *ptex displacement file*
-  A single-channel ptex file (preferrably float precision) containing the 
+  A single-channel ptex file (preferably float precision) containing the 
   displacement values.
 
 *ptex occlusion file*
-  A single-channel ptex file (preferrably 8 bits precision) containing a 
+  A single-channel ptex file (preferably 8 bits precision) containing a 
   pre-computed ambient occlusion signal.
 
 *ptex specular file*
-  A single-channel ptex file (preferrably 8 bits precision) applied to modulate
+  A single-channel ptex file (preferably 8 bits precision) applied to modulate
   the specular reflectance of the material
   
-*objfile(s)*
-  A sequence of obj files used as an animation loop (the topology has to match
-  the data contained in all the ptex files !)
-
-
-Keyboard Controls
+KEYBOARD CONTROLS
 =================
 
    .. code:: c++
@@ -126,10 +104,9 @@ Keyboard Controls
       esc    : hide GUI
       x      : save screenshot
       f      : fit frame
-      +/-    : increase / decrese tessellation rate
+      +/-    : increase / decrease tessellation rate
       r      : reload and re-compile the shader files
       e      : draw normals
-
 
 
 .. include:: examples_see_also.rst

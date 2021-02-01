@@ -112,6 +112,21 @@ out block {
 void main()
 {
     outpt.v.position = ModelViewMatrix * position;
+
+    // We don't actually want to write all these, but some
+    // compilers complain during about failing to fully write
+    // outpt.v if they are excluded.
+    outpt.v.normal = vec3(0);
+    outpt.v.tangent = vec3(0);
+    outpt.v.bitangent = vec3(0);
+    outpt.v.patchCoord = vec4(0);
+    outpt.v.tessCoord = vec2(0);
+#if defined OSD_COMPUTE_NORMAL_DERIVATIVES
+    outpt.v.Nu = vec3(0);
+    outpt.v.Nv = vec3(0);
+#endif
+    // --
+
     OSD_USER_VARYING_PER_VERTEX();
 }
 
@@ -151,6 +166,42 @@ out block {
     OSD_USER_VARYING_DECLARE
 } outpt;
 
+uniform isamplerBuffer OsdFVarParamBuffer;
+layout(std140) uniform OsdFVarArrayData {
+    OsdPatchArray fvarPatchArray[2];
+};
+
+vec2
+interpolateFaceVarying(vec2 uv, int fvarOffset)
+{
+    int patchIndex = OsdGetPatchIndex(gl_PrimitiveID);
+
+    OsdPatchArray array = fvarPatchArray[0];
+
+    ivec3 fvarPatchParam = texelFetch(OsdFVarParamBuffer, patchIndex).xyz;
+    OsdPatchParam param = OsdPatchParamInit(fvarPatchParam.x,
+                                            fvarPatchParam.y,
+                                            fvarPatchParam.z);
+
+    int patchType = OsdPatchParamIsRegular(param) ? array.regDesc : array.desc;
+
+    float wP[20], wDu[20], wDv[20], wDuu[20], wDuv[20], wDvv[20];
+    int numPoints = OsdEvaluatePatchBasisNormalized(patchType, param,
+                uv.s, uv.t, wP, wDu, wDv, wDuu, wDuv, wDvv);
+
+    int primOffset = patchIndex * array.stride;
+
+    vec2 result = vec2(0);
+    for (int i=0; i<numPoints; ++i) {
+        int index = (primOffset+i)*OSD_FVAR_WIDTH + fvarOffset;
+        vec2 cv = vec2(texelFetch(OsdFVarDataBuffer, index).s,
+                       texelFetch(OsdFVarDataBuffer, index + 1).s);
+        result += wP[i] * cv;
+    }
+
+    return result;
+}
+
 void emit(int index, vec3 normal)
 {
     outpt.v.position = inpt[index].v.position;
@@ -160,21 +211,22 @@ void emit(int index, vec3 normal)
     outpt.v.normal = normal;
 #endif
 
-#ifdef LOOP  // ----- scheme : LOOP
-    vec2 uv;
-    OSD_COMPUTE_FACE_VARYING_TRI_2(uv, /*fvarOffste=*/0, index);
-
-#else        // ----- scheme : CATMARK / BILINEAR
-
-#ifdef UNIFORM_SUBDIVISION
+#ifdef SHADING_FACEVARYING_UNIFORM_SUBDIVISION
+    // interpolate fvar data at refined tri or quad vertex locations
+#ifdef PRIM_TRI
+    vec2 trist[3] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1));
+    vec2 st = trist[index];
+#endif
+#ifdef PRIM_QUAD
     vec2 quadst[4] = vec2[](vec2(0,0), vec2(1,0), vec2(1,1), vec2(0,1));
     vec2 st = quadst[index];
+#endif
 #else
+    // interpolate fvar data at tessellated vertex locations
     vec2 st = inpt[index].v.tessCoord;
 #endif
-    vec2 uv;
-    OSD_COMPUTE_FACE_VARYING_2(uv, /*fvarOffset=*/0, st);
-#endif      // ------ scheme
+
+    vec2 uv = interpolateFaceVarying(st, /*fvarOffset*/0);
 
     outpt.color = vec3(uv.s, uv.t, 0);
 
@@ -325,7 +377,7 @@ void
 main()
 {
 #ifdef GEOMETRY_UV_VIEW
-    outColor = edgeColor(vec4(0.5));
+    outColor = edgeColor(vec4(0.9));
     return;
 
 #else

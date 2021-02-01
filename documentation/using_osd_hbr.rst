@@ -39,7 +39,7 @@ Using Hbr
        As of OpenSubdiv 3.0, all **Hbr** dependencies have been removed from the
        core APIs (**Sdc**, **Vtr**, **Far**, **Osd**). The legacy source code of
        **Hbr** is provided purely for regression and legacy purposes. If your code
-       is currently depending on Hbr functionaliy, we recommend migrating to the
+       is currently depending on Hbr functionality, we recommend migrating to the
        newer APIs as we cannot guarantee that this code will be maintained in
        future releases.
        For more information see the `3.0 release notes <release_notes.html>`_
@@ -213,7 +213,7 @@ to know the number of vertices in the face and the indices of these vertices.
         mesh->NewFace(nv, fv, 0);
     }
 
-However, currently **Hbr** is not able to handle `non-manifold <subdivision_surfaces.html#manifold-geometry>`__
+However, **Hbr** is not able to handle `non-manifold <subdivision_surfaces.html#non-manifold-topology>`__
 geometry. In order to avoid tripping asserts or causing memory violations, let's
 rewrite the previous loop with some some prototype code to check the validity of
 the topology.
@@ -312,7 +312,6 @@ The rule-set can be selected using the following accessors:
 
 
 Additional information on boundary interpolation rules can be found
-`here <subdivision_surfaces.html#boundary-interpolation-rules>`__ and
 `here <hbr_overview.html#boundary-interpolation-rules>`__
 
 .. container:: impnotip
@@ -442,8 +441,7 @@ Modifications are one of the following 3 operations:
 | Subtract  |
 +-----------+
 
-Here is a simple example that creates a hierarchical vertex edit that corresponds
-to `this example <subdivision_surfaces.html#hierarchical-edits-paths>`__.
+Here is a simple example that creates a hierarchical vertex edit.
 
 .. code:: c++
 

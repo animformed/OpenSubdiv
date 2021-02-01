@@ -23,12 +23,12 @@
 //
 
 #include "objAnim.h"
-
-#include <../regression/common/shape_utils.h>
+#include "../../regression/common/shape_utils.h"
 
 #include <cassert>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -46,13 +46,26 @@ ObjAnim::InterpolatePositions(float time, float * positions, int stride) const {
 
     assert(positions);
 
-    if ( _positions.empty() or (not _shape)) {
+    if ( _positions.empty() || (! _shape)) {
         //printf("Error: InterpolatePositions on unfit ObjAnim instance\n");
         return;
     }
 
     int nkeys = GetNumKeyframes(),
         nverts = GetShape()->GetNumVertices();
+
+    assert(nkeys>0);
+
+    if (nkeys==1) {
+        // nothing to interpolate - just copy the coarse verts positions
+        float const * vert = &_positions[0][0];
+        for (int i = 0; i <nverts; ++i) {
+             memcpy( positions, vert, sizeof(float)*3);
+             positions += stride;
+             vert += 3;
+        }
+        return;
+    }
 
     const float fps = 24.0f;
 
@@ -75,13 +88,13 @@ ObjAnim::InterpolatePositions(float time, float * positions, int stride) const {
 }
 
 ObjAnim const *
-ObjAnim::Create(std::vector<char const *> objFiles, bool axis) {
+ObjAnim::Create(std::vector<char const *> objFiles, Scheme scheme, bool isLeftHanded) {
 
     ObjAnim * anim=0;
 
     Shape const * shape = 0;
 
-    if (not objFiles.empty()) {
+    if (! objFiles.empty()) {
 
         anim = new ObjAnim;
 
@@ -89,7 +102,7 @@ ObjAnim::Create(std::vector<char const *> objFiles, bool axis) {
 
         for (int i = 0; i < (int)objFiles.size(); ++i) {
 
-            if (not objFiles[i]) {
+            if (! objFiles[i]) {
                 continue;
             }
 
@@ -105,7 +118,7 @@ ObjAnim::Create(std::vector<char const *> objFiles, bool axis) {
                 fflush(stdout);
                 std::string str = ss.str();
 
-                shape = Shape::parseObj(str.c_str(), kCatmark, axis);
+                shape = Shape::parseObj(str.c_str(), scheme, isLeftHanded);
 
                 if (i==0) {
 

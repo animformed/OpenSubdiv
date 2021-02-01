@@ -22,14 +22,14 @@
 #   language governing permissions and limitations under the Apache License.
 #
 
-include_directories("${PROJECT_SOURCE_DIR}/opensubdiv")
+include_directories("${OPENSUBDIV_INCLUDE_DIR}")
 
-_add_possibly_cuda_executable(hbr_regression
+osd_add_possibly_cuda_executable(hbr_regression "regression"
    main.cpp
     $<TARGET_OBJECTS:regression_common_obj>
 )
 
-# This is waht we "should" be using but we need to escape the backslash and cmake
+# This is what we "should" be using but we need to escape the backslash and cmake
 # regex doesn't allow that apparently
 #file(TO_NATIVE_PATH "${PROJECT_SOURCE_DIR}/regression/hbr_regression/baseline/" HBR_BASELINE_DIR)
 
@@ -44,7 +44,7 @@ add_definitions(
 )
 
 
-_add_executable(hbr_baseline
+osd_add_executable(hbr_baseline "regression"
    baseline.cpp
     $<TARGET_OBJECTS:regression_common_obj>
 )

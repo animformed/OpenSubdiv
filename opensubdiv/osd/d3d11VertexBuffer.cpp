@@ -23,7 +23,7 @@
 //
 
 #include "../osd/d3d11VertexBuffer.h"
-#include "../osd/error.h"
+#include "../far/error.h"
 
 #include <D3D11.h>
 #include <cassert>
@@ -35,9 +35,9 @@ namespace Osd {
 
 #define SAFE_RELEASE(p) { if(p) { (p)->Release(); (p)=NULL; } }
 
-D3D11VertexBuffer::D3D11VertexBuffer(int numElements, int numVertices,
-                                           ID3D11Device *device)
-    : _numElements(numElements), _numVertices(numVertices), _buffer(0), _uploadBuffer(0), _uav(0) {
+D3D11VertexBuffer::D3D11VertexBuffer(int numElements, int numVertices)
+    : _numElements(numElements), _numVertices(numVertices), _buffer(0),
+      _uploadBuffer(0), _uav(0) {
 }
 
 D3D11VertexBuffer::~D3D11VertexBuffer() {
@@ -49,9 +49,12 @@ D3D11VertexBuffer::~D3D11VertexBuffer() {
 
 D3D11VertexBuffer*
 D3D11VertexBuffer::Create(int numElements, int numVertices,
-                             ID3D11Device *device) {
+                          ID3D11DeviceContext *deviceContext) {
     D3D11VertexBuffer *instance =
-        new D3D11VertexBuffer(numElements, numVertices, device);
+        new D3D11VertexBuffer(numElements, numVertices);
+
+    ID3D11Device *device;
+    deviceContext->GetDevice(&device);
     if (instance->allocate(device)) return instance;
     delete instance;
     return NULL;
@@ -59,30 +62,28 @@ D3D11VertexBuffer::Create(int numElements, int numVertices,
 
 void
 D3D11VertexBuffer::UpdateData(const float *src, int startVertex, int numVertices,
-                                 void *param) {
+                              ID3D11DeviceContext *deviceContext) {
 
-    ID3D11DeviceContext * pd3dDeviceContext =
-        static_cast<ID3D11DeviceContext*>(param);
-    assert(pd3dDeviceContext);
+    assert(deviceContext);
 
     D3D11_MAPPED_SUBRESOURCE resource;
-    HRESULT hr = pd3dDeviceContext->Map(_uploadBuffer, 0,
-                                        D3D11_MAP_WRITE_DISCARD, 0, &resource);
+    HRESULT hr = deviceContext->Map(_uploadBuffer, 0,
+                                    D3D11_MAP_WRITE_DISCARD, 0, &resource);
 
     if (FAILED(hr)) {
-        Error(OSD_D3D11_BUFFER_MAP_ERROR, "Failed to map buffer\n");
+        Far::Error(Far::FAR_RUNTIME_ERROR, "Failed to map buffer\n");
         return;
     }
 
-    int size = GetNumElements() * numVertices * sizeof(float);
+    unsigned int size = GetNumElements() * numVertices * sizeof(float);
 
     memcpy((float*)resource.pData + startVertex * _numElements, src, size);
 
-    pd3dDeviceContext->Unmap(_uploadBuffer, 0);
+    deviceContext->Unmap(_uploadBuffer, 0);
 
     D3D11_BOX srcBox = { 0, 0, 0, size, 1, 1 };
-    pd3dDeviceContext->CopySubresourceRegion(_buffer, 0, 0, 0, 0,
-                                             _uploadBuffer, 0, &srcBox);
+    deviceContext->CopySubresourceRegion(_buffer, 0, 0, 0, 0,
+                                         _uploadBuffer, 0, &srcBox);
 }
 
 int
@@ -122,7 +123,7 @@ D3D11VertexBuffer::allocate(ID3D11Device *device) {
 
     HRESULT hr = device->CreateBuffer(&hBufferDesc, NULL, &_buffer);
     if (FAILED(hr)) {
-        Error(OSD_D3D11_VERTEX_BUFFER_CREATE_ERROR,
+        Far::Error(Far::FAR_RUNTIME_ERROR,
                  "Failed to create vertex buffer\n");
         return false;
     }
@@ -136,7 +137,7 @@ D3D11VertexBuffer::allocate(ID3D11Device *device) {
 
     hr = device->CreateBuffer(&hBufferDesc, NULL, &_uploadBuffer);
     if (FAILED(hr)) {
-        Error(OSD_D3D11_VERTEX_BUFFER_CREATE_ERROR,
+        Far::Error(Far::FAR_RUNTIME_ERROR,
                  "Failed to create upload vertex buffer\n");
         return false;
     }
@@ -149,7 +150,7 @@ D3D11VertexBuffer::allocate(ID3D11Device *device) {
     uavd.Buffer.NumElements = _numElements * _numVertices;
     hr = device->CreateUnorderedAccessView(_buffer, &uavd, &_uav);
     if (FAILED(hr)) {
-        Error(OSD_D3D11_VERTEX_BUFFER_CREATE_ERROR,
+        Far::Error(Far::FAR_RUNTIME_ERROR,
                  "Failed to create unordered access resource view\n");
         return false;
     }

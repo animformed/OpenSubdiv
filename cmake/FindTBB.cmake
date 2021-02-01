@@ -37,6 +37,7 @@ if (WIN32)
         HINTS
             "${TBB_LOCATION}/include"
             "$ENV{TBB_LOCATION}/include"
+        PATHS
             "$ENV{PROGRAMFILES}/Intel/TBB/include"
             /usr/include
             DOC "The directory where TBB headers reside")
@@ -47,6 +48,7 @@ elseif (APPLE)
         HINTS
             "${TBB_LOCATION}/include"
             "$ENV{TBB_LOCATION}/include"
+        PATHS
             DOC "The directory where TBB headers reside")
 else ()
     find_path(TBB_INCLUDE_DIR
@@ -55,6 +57,7 @@ else ()
         HINTS
             "${TBB_LOCATION}/include"
             "$ENV{TBB_LOCATION}/include"
+        PATHS
             /usr/include
             /usr/local/include
             /usr/openwin/share/include
@@ -66,13 +69,14 @@ set (TBB_LIB_ARCH "")
 
 if (WIN32)
 
-        if ("${CMAKE_GENERATOR}" MATCHES "[Ww]in64")
+    if ("${CMAKE_GENERATOR}" MATCHES "[Ww]in64" OR
+        "${CMAKE_GENERATOR_PLATFORM}" MATCHES "x64")
         set(WINPATH intel64)
     else ()
         set(WINPATH ia32)
     endif()
 
-        if (MSVC80)
+    if (MSVC80)
         set(WINPATH "${WINPATH}/vc8")
     elseif (MSVC90)
         set(WINPATH "${WINPATH}/vc9")
@@ -80,6 +84,10 @@ if (WIN32)
         set(WINPATH "${WINPATH}/vc10")
     elseif (MSVC11)
         set(WINPATH "${WINPATH}/vc11")
+    elseif (MSVC12)
+        set(WINPATH "${WINPATH}/vc12")
+    elseif (MSVC14)
+        set(WINPATH "${WINPATH}/vc14")
     endif()
 
     list(APPEND TBB_LIB_ARCH ${WINPATH})
@@ -98,11 +106,7 @@ else()
 endif()
 
 # List library files
-foreach(TBB_LIB tbb             tbb_debug
-                tbbmalloc       tbbmalloc_debug
-                tbbmalloc_proxy tbbmalloc_proxy_debug
-                tbb_preview     tbb_preview_debug)
-
+foreach(TBB_LIB tbb             tbb_debug)
 
     find_library(TBB_${TBB_LIB}_LIBRARY
         NAMES

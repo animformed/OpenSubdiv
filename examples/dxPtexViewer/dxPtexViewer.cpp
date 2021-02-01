@@ -25,63 +25,55 @@
 #include <D3D11.h>
 #include <D3Dcompiler.h>
 
-#include <osd/error.h>
-#include <osd/vertex.h>
-#include <osd/d3d11DrawContext.h>
-#include <osd/d3d11DrawRegistry.h>
-#include <osd/d3d11PtexMipmapTexture.h>
+#include <opensubdiv/far/error.h>
 
-#include <osd/cpuD3D11VertexBuffer.h>
-#include <osd/cpuComputeContext.h>
-#include <osd/cpuComputeController.h>
-OpenSubdiv::Osd::CpuComputeController * g_cpuComputeController = NULL;
+#include <opensubdiv/osd/cpuD3D11VertexBuffer.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
 
 #ifdef OPENSUBDIV_HAS_OPENMP
-    #include <osd/ompComputeController.h>
-    OpenSubdiv::Osd::OmpComputeController * g_ompComputeController = NULL;
+    #include <opensubdiv/osd/ompEvaluator.h>
 #endif
 
-#undef OPENSUBDIV_HAS_OPENCL    // XXX: dyu OpenCL D3D11 interop needs work...
+#ifdef OPENSUBDIV_HAS_TBB
+    #include <opensubdiv/osd/tbbEvaluator.h>
+#endif
+
 #ifdef OPENSUBDIV_HAS_OPENCL
-    #include <osd/clD3D11VertexBuffer.h>
-    #include <osd/clComputeContext.h>
-    #include <osd/clComputeController.h>
-
-    #include "../common/clInit.h"
-
-    cl_context g_clContext;
-    cl_command_queue g_clQueue;
-    OpenSubdiv::Osd::CLComputeController * g_clComputeController = NULL;
+    #include <opensubdiv/osd/clD3D11VertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
+    #include "../common/clDeviceContext.h"
+    CLD3D11DeviceContext g_clDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_CUDA
-    #include <osd/cudaD3D11VertexBuffer.h>
-    #include <osd/cudaComputeContext.h>
-    #include <osd/cudaComputeController.h>
-
-    #include <cuda_runtime_api.h>
-    #include <cuda_d3d11_interop.h>
-
-    bool g_cudaInitialized = false;
-    OpenSubdiv::Osd::CudaComputeController * g_cudaComputeController = NULL;
+    #include <opensubdiv/osd/cudaD3D11VertexBuffer.h>
+    #include <opensubdiv/osd/cudaEvaluator.h>
+    #include "../common/cudaDeviceContext.h"
+    CudaDeviceContext g_cudaDeviceContext;
 #endif
 
-#include <osd/d3d11VertexBuffer.h>
-#include <osd/d3d11ComputeContext.h>
-#include <osd/d3d11ComputeController.h>
-OpenSubdiv::Osd::D3D11ComputeController * g_d3d11ComputeController = NULL;
+#include <opensubdiv/osd/d3d11VertexBuffer.h>
+#include <opensubdiv/osd/d3d11ComputeEvaluator.h>
 
-#include <osd/d3d11Mesh.h>
+#include <opensubdiv/osd/d3d11Mesh.h>
 OpenSubdiv::Osd::D3D11MeshInterface *g_mesh;
+
+#include "./sky.h"
 
 #include "Ptexture.h"
 #include "PtexUtils.h"
 
-#include <common/vtr_utils.h>
+#include "../../regression/common/arg_utils.h"
+#include "../../regression/common/far_utils.h"
+#include "../common/objAnim.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
-#include "../common/d3d11_hud.h"
+#include "../common/d3d11Hud.h"
+#include "../common/d3d11PtexMipmapTexture.h"
+#include "../common/d3d11ShaderCache.h"
+#include "../common/hdr_reader.h"
 
+#include <opensubdiv/osd/hlslPatchShaderSource.h>
 static const char *g_shaderSource =
 #include "shader.gen.h"
 ;
@@ -99,9 +91,10 @@ static const char *g_shaderSource =
 
 enum KernelType { kCPU = 0,
                   kOPENMP = 1,
-                  kCUDA = 2,
-                  kCL = 3,
-                  kDirectCompute = 4 };
+                  kTBB = 2,
+                  kCUDA = 3,
+                  kCL = 4,
+                  kDirectCompute = 5 };
 
 enum HudCheckBox { HUD_CB_ADAPTIVE,
                    HUD_CB_DISPLAY_OCCLUSION,
@@ -217,11 +210,16 @@ float g_animTime = 0;
 std::vector<float> g_positions,
                    g_normals;
 
-OpenSubdiv::Osd::D3D11PtexMipmapTexture * g_osdPTexImage = 0;
-OpenSubdiv::Osd::D3D11PtexMipmapTexture * g_osdPTexDisplacement = 0;
-OpenSubdiv::Osd::D3D11PtexMipmapTexture * g_osdPTexOcclusion = 0;
-OpenSubdiv::Osd::D3D11PtexMipmapTexture * g_osdPTexSpecular = 0;
+ObjAnim const * g_objAnim = 0;
+
+Sky * g_sky=0;
+
+D3D11PtexMipmapTexture * g_osdPTexImage = 0;
+D3D11PtexMipmapTexture * g_osdPTexDisplacement = 0;
+D3D11PtexMipmapTexture * g_osdPTexOcclusion = 0;
+D3D11PtexMipmapTexture * g_osdPTexSpecular = 0;
 const char * g_ptexColorFilename;
+size_t g_ptexMemoryUsage = 0;
 
 ID3D11Device * g_pd3dDevice = NULL;
 ID3D11DeviceContext * g_pd3dDeviceContext = NULL;
@@ -229,31 +227,79 @@ IDXGISwapChain * g_pSwapChain = NULL;
 ID3D11RenderTargetView * g_pSwapChainRTV = NULL;
 
 ID3D11RasterizerState* g_pRasterizerState = NULL;
-ID3D11InputLayout* g_pInputLayout = NULL;
-ID3D11DepthStencilState* g_pDepthStencilState = NULL;
+ID3D11InputLayout * g_pInputLayout = NULL;
+ID3D11DepthStencilState * g_pDepthStencilState = NULL;
 ID3D11Texture2D * g_pDepthStencilBuffer = NULL;
-ID3D11Buffer* g_pcbPerFrame = NULL;
-ID3D11Buffer* g_pcbTessellation = NULL;
-ID3D11Buffer* g_pcbLighting = NULL;
-ID3D11Buffer* g_pcbConfig = NULL;
-ID3D11DepthStencilView* g_pDepthStencilView = NULL;
+ID3D11Buffer * g_pcbPerFrame = NULL;
+ID3D11Buffer * g_pcbTessellation = NULL;
+ID3D11Buffer * g_pcbLighting = NULL;
+ID3D11Buffer * g_pcbConfig = NULL;
+ID3D11DepthStencilView * g_pDepthStencilView = NULL;
+
+ID3D11Texture2D * g_diffuseEnvironmentMap = NULL;
+ID3D11ShaderResourceView * g_diffuseEnvironmentSRV = NULL;
+
+ID3D11Texture2D * g_specularEnvironmentMap = NULL;
+ID3D11ShaderResourceView * g_specularEnvironmentSRV = NULL;
+
+ID3D11SamplerState * g_iblSampler = NULL;
+
+ID3D11Query * g_pipelineStatsQuery = NULL;
 
 bool g_bDone = false;
+
+//------------------------------------------------------------------------------
+
+static ID3D11Texture2D *
+createHDRTexture(ID3D11Device * device, char const * hdrFile) {
+
+    HdrInfo info;
+    unsigned char * image = loadHdr(hdrFile, &info, /*convertToFloat=*/true);
+    if (image) {
+
+        D3D11_TEXTURE2D_DESC texDesc;
+        ZeroMemory(&texDesc, sizeof(texDesc));
+        texDesc.Width = info.width;
+        texDesc.Height = info.height;
+        texDesc.MipLevels = 1;
+        texDesc.ArraySize = 1;
+        texDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.SampleDesc.Quality = 0;
+        texDesc.Usage = D3D11_USAGE_DEFAULT;
+        texDesc.BindFlags =  D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        texDesc.CPUAccessFlags = 0;
+        texDesc.MiscFlags = 0;
+
+        D3D11_SUBRESOURCE_DATA subData;
+        subData.pSysMem = (void *)image;
+        subData.SysMemPitch = info.width * 4 * sizeof(float);
+
+        ID3D11Texture2D * texture=0;
+        device->CreateTexture2D(&texDesc, &subData, &texture);
+
+        free(image);
+        return texture;
+    }
+    return 0;
+}
 
 //------------------------------------------------------------------------------
 static void
 calcNormals(OpenSubdiv::Far::TopologyRefiner * refiner,
     std::vector<float> const & pos, std::vector<float> & result ) {
 
-    typedef OpenSubdiv::Far::IndexArray IndexArray;
+    typedef OpenSubdiv::Far::ConstIndexArray IndexArray;
 
     // calc normal vectors
-    int nverts = refiner->GetNumVertices(0),
-        nfaces = refiner->GetNumFaces(0);
+    OpenSubdiv::Far::TopologyLevel const & refBaseLevel = refiner->GetLevel(0);
+
+    int nverts = refBaseLevel.GetNumVertices(),
+        nfaces = refBaseLevel.GetNumFaces();
 
     for (int face = 0; face < nfaces; ++face) {
 
-        IndexArray fverts = refiner->GetFaceVertices(0, face);
+        IndexArray fverts = refBaseLevel.GetFaceVertices(face);
 
         float const * p0 = &pos[fverts[0]*3],
                     * p1 = &pos[fverts[1]*3],
@@ -279,28 +325,43 @@ updateGeom() {
 
     int nverts = (int)g_positions.size() / 3;
 
-    std::vector<float> vertex;
-    vertex.reserve(nverts*6);
+    if (g_moveScale && g_adaptive && g_objAnim) {
 
-    const float *p = &g_positions[0];
-    const float *n = &g_normals[0];
+        // baked animation only works with adaptive for now
+        // (since non-adaptive requires normals)
+        // but we clear space in the buffer for normals since
+        // we do not have an easy shader variant with positions only
+        int numElements = 6; //g_adaptive ? 3 : 6;
+        std::vector<float> vertex(nverts*numElements, 0.0f);
 
-    for (int i = 0; i < nverts; ++i) {
-        float move = g_size*0.005f*cosf(p[0]*100/g_size+g_frame*0.01f);
-        vertex.push_back(p[0]);
-        vertex.push_back(p[1]+g_moveScale*move);
-        vertex.push_back(p[2]);
-        p += 3;
-//        if (g_adaptive == false)
-        {
-            vertex.push_back(n[0]);
-            vertex.push_back(n[1]);
-            vertex.push_back(n[2]);
-            n += 3;
+        g_objAnim->InterpolatePositions(g_animTime, &vertex[0], numElements);
+
+        g_mesh->UpdateVertexBuffer(&vertex[0], 0, nverts);
+
+    } else {
+        std::vector<float> vertex;
+        vertex.reserve(nverts*6);
+
+        const float *p = &g_positions[0];
+        const float *n = &g_normals[0];
+
+        for (int i = 0; i < nverts; ++i) {
+            float move = g_size*0.005f*cosf(p[0]*100/g_size+g_frame*0.01f);
+            vertex.push_back(p[0]);
+            vertex.push_back(p[1]+g_moveScale*move);
+            vertex.push_back(p[2]);
+            p += 3;
+    //        if (g_adaptive == false)
+            {
+                vertex.push_back(n[0]);
+                vertex.push_back(n[1]);
+                vertex.push_back(n[2]);
+                n += 3;
+            }
         }
-    }
 
-    g_mesh->UpdateVertexBuffer(&vertex[0], 0, nverts);
+        g_mesh->UpdateVertexBuffer(&vertex[0], 0, nverts);
+    }
 
     Stopwatch s;
     s.Start();
@@ -381,6 +442,7 @@ createPTexGeo(PtexTexture * r) {
         }
     }
 
+    g_size=0.0f;
     for (int j = 0; j < 3; ++j) {
         g_center[j] = (min[j] + max[j]) * 0.5f;
         g_size += (max[j]-min[j])*(max[j]-min[j]);
@@ -394,10 +456,12 @@ createPTexGeo(PtexTexture * r) {
 static const char *
 getKernelName(int kernel) {
 
-         if (kernel == kCPU)
+    if (kernel == kCPU)
         return "CPU";
     else if (kernel == kOPENMP)
         return "OpenMP";
+    else if (kernel == kTBB)
+        return "TBB";
     else if (kernel == kCUDA)
         return "Cuda";
     else if (kernel == kCL)
@@ -430,181 +494,229 @@ union Effect {
     }
 };
 
-typedef std::pair<OpenSubdiv::Osd::DrawContext::PatchDescriptor, Effect> EffectDesc;
+struct EffectDesc {
+    EffectDesc(OpenSubdiv::Far::PatchDescriptor desc,
+               Effect effect) : desc(desc), effect(effect),
+                                maxValence(0), numElements(0) { }
 
+    OpenSubdiv::Far::PatchDescriptor desc;
+    Effect effect;
+    int maxValence;
+    int numElements;
 
-class EffectDrawRegistry : public OpenSubdiv::Osd::D3D11DrawRegistry<EffectDesc> {
-
-protected:
-    virtual ConfigType *
-    _CreateDrawConfig(DescType const & desc,
-                      SourceConfigType const * sconfig,
-                      ID3D11Device * pd3dDevice,
-                      ID3D11InputLayout ** ppInputLayout,
-                      D3D11_INPUT_ELEMENT_DESC const * pInputElementDescs,
-                      int numInputElements);
-
-    virtual SourceConfigType *
-    _CreateDrawSourceConfig(DescType const & desc, ID3D11Device * pd3dDevice);
+    bool operator < (const EffectDesc &e) const {
+        return desc < e.desc || (desc == e.desc &&
+              (maxValence < e.maxValence || ((maxValence == e.maxValence) &&
+              (effect < e.effect))));
+    }
 };
 
-EffectDrawRegistry::SourceConfigType *
-EffectDrawRegistry::_CreateDrawSourceConfig(DescType const & desc, ID3D11Device *pd3dDevice)
-{
-    Effect effect = desc.second;
+class ShaderCache : public D3D11ShaderCache<EffectDesc> {
+public:
+    virtual D3D11DrawConfig *CreateDrawConfig(EffectDesc const &effectDesc) {
+        using namespace OpenSubdiv;
 
-    SetPtexEnabled(true);
+        D3D11DrawConfig *config = new D3D11DrawConfig();
 
-    SourceConfigType * sconfig =
-        BaseRegistry::_CreateDrawSourceConfig(desc.first, pd3dDevice);
-    assert(sconfig);
+        Far::PatchDescriptor::Type type = effectDesc.desc.GetType();
 
-    if (effect.patchCull)
-        sconfig->commonShader.AddDefine("OSD_ENABLE_PATCH_CULL");
-    if (effect.screenSpaceTess)
-        sconfig->commonShader.AddDefine("OSD_ENABLE_SCREENSPACE_TESSELLATION");
-    if (effect.fractionalSpacing)
-        sconfig->commonShader.AddDefine("OSD_FRACTIONAL_ODD_SPACING");
+        // common defines
+        std::stringstream ss;
 
-    bool quad = true;
-    if (desc.first.GetType() == OpenSubdiv::Far::PatchTables::QUADS ||
-        desc.first.GetType() == OpenSubdiv::Far::PatchTables::TRIANGLES) {
-        sconfig->vertexShader.source = g_shaderSource;
-        sconfig->vertexShader.target = "vs_5_0";
-        sconfig->vertexShader.entry = "vs_main";
-        if (effect.displacement) {
-            sconfig->geometryShader.AddDefine("FLAT_NORMALS");
+        if (type == Far::PatchDescriptor::QUADS) {
+            ss << "#define PRIM_QUAD\n";
+        } else {
+            ss << "#define PRIM_TRI\n";
         }
-    } else {
-        quad = false;
-        sconfig->vertexShader.source = g_shaderSource + sconfig->vertexShader.source;
-        sconfig->domainShader.source = g_shaderSource + sconfig->domainShader.source;
-        sconfig->hullShader.source = g_shaderSource + sconfig->hullShader.source;
-        if (effect.displacement and (not effect.normal))
-            sconfig->geometryShader.AddDefine("FLAT_NORMALS");
-    }
 
-    sconfig->geometryShader.source = g_shaderSource;
-    sconfig->geometryShader.target = "gs_5_0";
-    sconfig->geometryShader.entry = "gs_main";
+        // OSD tessellation controls
+        if (effectDesc.effect.screenSpaceTess) {
+            ss << "#define OSD_ENABLE_SCREENSPACE_TESSELLATION\n";
+        }
+        if (effectDesc.effect.fractionalSpacing) {
+            ss << "#define OSD_FRACTIONAL_ODD_SPACING\n";
+        }
+        if (effectDesc.effect.patchCull) {
+            ss << "#define OSD_ENABLE_PATCH_CULL\n";
+        }
 
-    sconfig->pixelShader.source = g_shaderSource;
-    sconfig->pixelShader.target = "ps_5_0";
-    sconfig->pixelShader.entry = "ps_main";
+       // add ptex functions
+        ss << D3D11PtexMipmapTexture::GetShaderSource();
 
-    switch (effect.color) {
-    case COLOR_NONE:
-        break;
-    case COLOR_PTEX_NEAREST:
-        sconfig->pixelShader.AddDefine("COLOR_PTEX_NEAREST");
-        break;
-    case COLOR_PTEX_HW_BILINEAR:
-        sconfig->pixelShader.AddDefine("COLOR_PTEX_HW_BILINEAR");
-        break;
-    case COLOR_PTEX_BILINEAR:
-        sconfig->pixelShader.AddDefine("COLOR_PTEX_BILINEAR");
-        break;
-    case COLOR_PTEX_BIQUADRATIC:
-        sconfig->pixelShader.AddDefine("COLOR_PTEX_BIQUADRATIC");
-        break;
-    case COLOR_PATCHTYPE:
-        sconfig->pixelShader.AddDefine("COLOR_PATCHTYPE");
-        break;
-    case COLOR_PATCHCOORD:
-        sconfig->pixelShader.AddDefine("COLOR_PATCHCOORD");
-        break;
-    case COLOR_NORMAL:
-        sconfig->pixelShader.AddDefine("COLOR_NORMAL");
-        break;
-    }
+        // -------------------------------------------------------------
+        // display styles
+        // -------------------------------------------------------------
 
-    switch (effect.displacement) {
-    case DISPLACEMENT_NONE:
-        break;
-    case DISPLACEMENT_HW_BILINEAR:
-        sconfig->commonShader.AddDefine("DISPLACEMENT_HW_BILINEAR");
-        break;
-    case DISPLACEMENT_BILINEAR:
-        sconfig->commonShader.AddDefine("DISPLACEMENT_BILINEAR");
-        break;
-    case DISPLACEMENT_BIQUADRATIC:
-        sconfig->commonShader.AddDefine("DISPLACEMENT_BIQUADRATIC");
-        break;
-    }
+        // mipmap
+        if (effectDesc.effect.seamless) {
+            ss << "#define SEAMLESS_MIPMAP\n";
+        }
 
-    switch (effect.normal) {
-    case NORMAL_FACET:
-        sconfig->commonShader.AddDefine("NORMAL_FACET");
-        break;
-    case NORMAL_HW_SCREENSPACE:
-        sconfig->commonShader.AddDefine("NORMAL_HW_SCREENSPACE");
-        break;
-    case NORMAL_SCREENSPACE:
-        sconfig->commonShader.AddDefine("NORMAL_SCREENSPACE");
-        break;
-    case NORMAL_BIQUADRATIC:
-        sconfig->commonShader.AddDefine("NORMAL_BIQUADRATIC");
-        break;
-    case NORMAL_BIQUADRATIC_WG:
-        sconfig->commonShader.AddDefine("OSD_COMPUTE_NORMAL_DERIVATIVES");
-        sconfig->commonShader.AddDefine("NORMAL_BIQUADRATIC_WG");
-        break;
-    }
+        //  wire
+        if (effectDesc.effect.wire == 0) {
+            ss << "#define GEOMETRY_OUT_WIRE\n";
+        } else if (effectDesc.effect.wire == 1) {
+            ss << "#define GEOMETRY_OUT_FILL\n";
+        } else if (effectDesc.effect.wire == 2) {
+            ss << "#define GEOMETRY_OUT_LINE\n";
+        }
 
-    if (effect.occlusion)
-        sconfig->pixelShader.AddDefine("USE_PTEX_OCCLUSION");
-    if (effect.specular)
-        sconfig->pixelShader.AddDefine("USE_PTEX_SPECULAR");
-    if (effect.ibl)
-        sconfig->pixelShader.AddDefine("USE_IBL");
+        //  color
+        switch(effectDesc.effect.color) {
+        case COLOR_NONE:
+            break;
+        case COLOR_PTEX_NEAREST:
+            ss << "#define COLOR_PTEX_NEAREST\n";
+            break;
+        case COLOR_PTEX_HW_BILINEAR:
+            ss << "#define COLOR_PTEX_HW_BILINEAR\n";
+            break;
+        case COLOR_PTEX_BILINEAR:
+            ss << "#define COLOR_PTEX_BILINEAR\n";
+            break;
+        case COLOR_PTEX_BIQUADRATIC:
+            ss << "#define COLOR_PTEX_BIQUADRATIC\n";
+            break;
+        case COLOR_PATCHTYPE:
+            ss << "#define COLOR_PATCHTYPE\n";
+            break;
+        case COLOR_PATCHCOORD:
+            ss << "#define COLOR_PATCHCOORD\n";
+            break;
+        case COLOR_NORMAL:
+            ss << "#define COLOR_NORMAL\n";
+            break;
+        }
 
-    if (quad) {
-        sconfig->geometryShader.AddDefine("PRIM_QUAD");
-        sconfig->pixelShader.AddDefine("PRIM_QUAD");
-    } else {
-        sconfig->geometryShader.AddDefine("PRIM_TRI");
-        sconfig->pixelShader.AddDefine("PRIM_TRI");
-    }
+        // displacement
+        switch (effectDesc.effect.displacement) {
+        case DISPLACEMENT_NONE:
+            break;
+        case DISPLACEMENT_HW_BILINEAR:
+            ss << "#define DISPLACEMENT_HW_BILINEAR\n";
+            break;
+        case DISPLACEMENT_BILINEAR:
+            ss << "#define DISPLACEMENT_BILINEAR\n";
+            break;
+        case DISPLACEMENT_BIQUADRATIC:
+            ss << "#define DISPLACEMENT_BIQUADRATIC\n";
+            break;
+        }
 
-    if (effect.seamless) {
-        sconfig->commonShader.AddDefine("SEAMLESS_MIPMAP");
-    }
+        // normal
+        switch (effectDesc.effect.normal) {
+        case NORMAL_FACET:
+            ss << "#define NORMAL_FACET\n";
+            break;
+        case NORMAL_HW_SCREENSPACE:
+            ss << "#define NORMAL_HW_SCREENSPACE\n";
+            break;
+        case NORMAL_SCREENSPACE:
+            ss << "#define NORMAL_SCREENSPACE\n";
+            break;
+        case NORMAL_BIQUADRATIC:
+            ss << "#define NORMAL_BIQUADRATIC\n";
+            break;
+        case NORMAL_BIQUADRATIC_WG:
+            ss << "#define OSD_COMPUTE_NORMAL_DERIVATIVES\n";
+            ss << "#define NORMAL_BIQUADRATIC_WG\n";
+            break;
+        }
 
-    if (effect.wire == 0) {
-        sconfig->geometryShader.AddDefine("GEOMETRY_OUT_WIRE");
-        sconfig->pixelShader.AddDefine("GEOMETRY_OUT_WIRE");
-    } else if (effect.wire == 1) {
-        sconfig->geometryShader.AddDefine("GEOMETRY_OUT_FILL");
-        sconfig->pixelShader.AddDefine("GEOMETRY_OUT_FILL");
-    } else if (effect.wire == 2) {
-        sconfig->geometryShader.AddDefine("GEOMETRY_OUT_LINE");
-        sconfig->pixelShader.AddDefine("GEOMETRY_OUT_LINE");
-    }
+        // occlusion
+        if (effectDesc.effect.occlusion)
+            ss << "#define USE_PTEX_OCCLUSION\n";
 
-    return sconfig;
-}
+        // specular
+        if (effectDesc.effect.specular)
+            ss << "#define USE_PTEX_SPECULAR\n";
 
-EffectDrawRegistry::ConfigType *
-EffectDrawRegistry::_CreateDrawConfig(
-        DescType const & desc,
-        SourceConfigType const * sconfig,
-        ID3D11Device * pd3dDevice,
-        ID3D11InputLayout ** ppInputLayout,
-        D3D11_INPUT_ELEMENT_DESC const * pInputElementDescs,
-        int numInputElements) {
+        // IBL
+        if (effectDesc.effect.ibl)
+            ss << "#define USE_IBL\n";
 
-    ConfigType * config = BaseRegistry::_CreateDrawConfig(desc.first, sconfig,
-        pd3dDevice, ppInputLayout, pInputElementDescs, numInputElements);
-    assert(config);
+        // need for patch color-coding : we need these defines in the fragment shader
+        if (type == Far::PatchDescriptor::GREGORY) {
+            ss << "#define OSD_PATCH_GREGORY\n";
+        } else if (type == Far::PatchDescriptor::GREGORY_BOUNDARY) {
+            ss << "#define OSD_PATCH_GREGORY_BOUNDARY\n";
+        } else if (type == Far::PatchDescriptor::GREGORY_BASIS) {
+            ss << "#define OSD_PATCH_GREGORY_BASIS\n";
+        }
 
-    return config;
-}
+        // include osd PatchCommon
+        ss << Osd::HLSLPatchShaderSource::GetCommonShaderSource();
+        std::string common = ss.str();
+        ss.str("");
 
-EffectDrawRegistry effectRegistry;
+        // input layout
+        const D3D11_INPUT_ELEMENT_DESC hInElementDesc[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 4*3, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        };
+
+        // vertex shader
+        ss << common
+           << g_shaderSource
+           << Osd::HLSLPatchShaderSource::GetVertexShaderSource(type);
+        if (effectDesc.desc.IsAdaptive()) {
+            config->CompileVertexShader("vs_5_0", "vs_main_patches", ss.str(),
+                                        &g_pInputLayout,
+                                        hInElementDesc,
+                                        ARRAYSIZE(hInElementDesc),
+                                        g_pd3dDevice);
+        } else {
+            config->CompileVertexShader("vs_5_0", "vs_main",
+                                        ss.str(),
+                                        &g_pInputLayout,
+                                        hInElementDesc,
+                                        ARRAYSIZE(hInElementDesc),
+                                        g_pd3dDevice);
+        }
+        ss.str("");
+
+
+        if (effectDesc.desc.IsAdaptive()) {
+            // hull shader
+            ss << common
+               << g_shaderSource
+               << Osd::HLSLPatchShaderSource::GetHullShaderSource(type);
+            config->CompileHullShader("hs_5_0", "hs_main_patches", ss.str(),
+                                      g_pd3dDevice);
+            ss.str("");
+
+            // domain shader
+            ss << common
+               << g_shaderSource
+               << Osd::HLSLPatchShaderSource::GetDomainShaderSource(type);
+            config->CompileDomainShader("ds_5_0", "ds_main_patches", ss.str(),
+                                        g_pd3dDevice);
+            ss.str("");
+        }
+
+        // geometry shader
+        ss << common
+           << g_shaderSource;
+        config->CompileGeometryShader("gs_5_0", "gs_main", ss.str(),
+                                      g_pd3dDevice);
+        ss.str("");
+
+        // pixel shader
+        ss << common
+           << g_shaderSource;
+        config->CompilePixelShader("ps_5_0", "ps_main", ss.str(),
+                                   g_pd3dDevice);
+        ss.str("");
+
+        return config;
+    };
+};
+
+ShaderCache g_shaderCache;
 
 //------------------------------------------------------------------------------
-OpenSubdiv::Osd::D3D11PtexMipmapTexture *
-createPtex(const char *filename) {
+D3D11PtexMipmapTexture *
+createPtex(const char *filename, int memLimit) {
 
     Ptex::String ptexError;
     printf("Loading ptex : %s\n", filename);
@@ -623,9 +735,11 @@ createPtex(const char *filename) {
         printf("Error in reading %s\n", filename);
         exit(1);
     }
-    OpenSubdiv::Osd::D3D11PtexMipmapTexture *osdPtex =
-        OpenSubdiv::Osd::D3D11PtexMipmapTexture::Create(g_pd3dDeviceContext,
-                                                      ptex, g_maxMipmapLevels);
+
+    size_t targetMemory = memLimit * 1024 * 1024; // MB
+
+    D3D11PtexMipmapTexture *osdPtex = D3D11PtexMipmapTexture::Create(
+        g_pd3dDeviceContext, ptex, g_maxMipmapLevels, targetMemory);
 
     ptex->release();
 
@@ -639,6 +753,8 @@ createPtex(const char *filename) {
 //------------------------------------------------------------------------------
 void
 createOsdMesh(int level, int kernel) {
+
+    using namespace OpenSubdiv;
     Ptex::String ptexError;
     PtexTexture *ptexColor = PtexTexture::open(g_ptexColorFilename, ptexError, true);
     if (ptexColor == NULL) {
@@ -648,28 +764,30 @@ createOsdMesh(int level, int kernel) {
 
     // generate Hbr representation from ptex
     Shape * shape = createPTexGeo(ptexColor);
-    if (not shape) {
+    if (!shape) {
         return;
     }
 
     g_positions=shape->verts;
 
-    typedef OpenSubdiv::Far::IndexArray IndexArray;
+    typedef OpenSubdiv::Far::ConstIndexArray IndexArray;
 
-    // create Vtr mesh (topology)
-    OpenSubdiv::Sdc::Type       sdctype = GetSdcType(*shape);
+    // create Far mesh (topology)
+    OpenSubdiv::Sdc::SchemeType sdctype = GetSdcType(*shape);
     OpenSubdiv::Sdc::Options sdcoptions = GetSdcOptions(*shape);
 
     OpenSubdiv::Far::TopologyRefiner * refiner =
-        OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Create(sdctype, sdcoptions, *shape);
+        OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Create(*shape,
+            OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Options(sdctype, sdcoptions));
 
     // save coarse topology (used for coarse mesh drawing)
+    OpenSubdiv::Far::TopologyLevel const & refBaseLevel = refiner->GetLevel(0);
 
     // create cage edge index
-    int nedges = refiner->GetNumEdges(0);
+    int nedges = refBaseLevel.GetNumEdges();
     std::vector<int> edgeIndices(nedges*2);
     for(int i=0; i<nedges; ++i) {
-        IndexArray verts = refiner->GetEdgeVertices(0, i);
+        IndexArray verts = refBaseLevel.GetEdgeVertices(i);
         edgeIndices[i*2  ]=verts[0];
         edgeIndices[i*2+1]=verts[1];
     }
@@ -683,81 +801,90 @@ createOsdMesh(int level, int kernel) {
     g_mesh = NULL;
 
     // Adaptive refinement currently supported only for catmull-clark scheme
-    bool doAdaptive = (g_adaptive != 0 and g_scheme == 0);
+    bool doAdaptive = (g_adaptive != 0 && g_scheme == 0);
 
     OpenSubdiv::Osd::MeshBitset bits;
     bits.set(OpenSubdiv::Osd::MeshAdaptive, doAdaptive);
-    bits.set(OpenSubdiv::Osd::MeshPtexData, true);
+    bits.set(OpenSubdiv::Osd::MeshEndCapGregoryBasis, true);
 
     int numVertexElements = 6; //g_adaptive ? 3 : 6;
     int numVaryingElements = 0;
 
-    if (kernel == kCPU) {
-        if (not g_cpuComputeController) {
-            g_cpuComputeController = new OpenSubdiv::Osd::CpuComputeController();
-        }
-        g_mesh = new OpenSubdiv::Osd::Mesh<OpenSubdiv::Osd::CpuD3D11VertexBuffer,
-                                         OpenSubdiv::Osd::CpuComputeController,
-                                         OpenSubdiv::Osd::D3D11DrawContext>(
-                                                g_cpuComputeController,
-                                                refiner,
-                                                numVertexElements,
-                                                numVaryingElements,
-                                                level, bits, g_pd3dDeviceContext);
+    if (g_kernel == kCPU) {
+        g_mesh = new Osd::Mesh<Osd::CpuD3D11VertexBuffer,
+                               Far::StencilTable,
+                               Osd::CpuEvaluator,
+                               Osd::D3D11PatchTable,
+                               ID3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits, NULL, g_pd3dDeviceContext);
+
 #ifdef OPENSUBDIV_HAS_OPENMP
     } else if (kernel == kOPENMP) {
-        if (not g_ompComputeController) {
-            g_ompComputeController = new OpenSubdiv::Osd::OmpComputeController();
-        }
-        g_mesh = new OpenSubdiv::Osd::Mesh<OpenSubdiv::Osd::CpuD3D11VertexBuffer,
-                                         OpenSubdiv::Osd::OmpComputeController,
-                                         OpenSubdiv::Osd::D3D11DrawContext>(
-                                                g_ompComputeController,
-                                                refiner,
-                                                numVertexElements,
-                                                numVaryingElements,
-                                                level, bits, g_pd3dDeviceContext);
+        g_mesh = new Osd::Mesh<Osd::CpuD3D11VertexBuffer,
+                               Far::StencilTable,
+                               Osd::OmpEvaluator,
+                               Osd::D3D11PatchTable,
+                               ID3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits, NULL, g_pd3dDeviceContext);
+#endif
+#ifdef OPENSUBDIV_HAS_TBB
+    } else if (kernel == kTBB) {
+        g_mesh = new Osd::Mesh<Osd::CpuD3D11VertexBuffer,
+                               Far::StencilTable,
+                               Osd::TbbEvaluator,
+                               Osd::D3D11PatchTable,
+                               ID3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits, NULL, g_pd3dDeviceContext);
 #endif
 #ifdef OPENSUBDIV_HAS_OPENCL
-    } else if (kernel == kCL) {
-        if (not g_clComputeController) {
-            g_clComputeController = new OpenSubdiv::Osd::CLComputeController(g_clContext, g_clQueue);
-        }
-        g_mesh = new OpenSubdiv::Osd::Mesh<OpenSubdiv::Osd::CLD3D11VertexBuffer,
-                                         OpenSubdiv::Osd::CLComputeController,
-                                         OpenSubdiv::Osd::D3D11DrawContext>(
-                                                g_clComputeController,
-                                                refiner,
-                                                numVertexElements,
-                                                numVaryingElements,
-                                                level, bits, g_pd3dDeviceContext);
+    } else if(kernel == kCL) {
+        static Osd::EvaluatorCacheT<Osd::CLEvaluator> clEvaluatorCache;
+        g_mesh = new Osd::Mesh<Osd::CLD3D11VertexBuffer,
+                               Osd::CLStencilTable,
+                               Osd::CLEvaluator,
+                               Osd::D3D11PatchTable,
+                               CLD3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits,
+                                   &clEvaluatorCache,
+                                   &g_clDeviceContext);
 #endif
 #ifdef OPENSUBDIV_HAS_CUDA
-    } else if (kernel == kCUDA) {
-        if (not g_cudaComputeController) {
-            g_cudaComputeController = new OpenSubdiv::Osd::CudaComputeController();
-        }
-        g_mesh = new OpenSubdiv::Osd::Mesh<OpenSubdiv::OsdCudaD3D11VertexBuffer,
-                                         OpenSubdiv::Osd::CudaComputeController,
-                                         OpenSubdiv::Osd::D3D11DrawContext>(
-                                                g_cudaComputeController,
-                                                refiner,
-                                                numVertexElements,
-                                                numVaryingElements,
-                                                level, bits, g_pd3dDeviceContext);
+    } else if (g_kernel == kCUDA) {
+        g_mesh = new Osd::Mesh<Osd::CudaD3D11VertexBuffer,
+                               Osd::CudaStencilTable,
+                               Osd::CudaEvaluator,
+                               Osd::D3D11PatchTable,
+                               ID3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits, NULL, g_pd3dDeviceContext);
 #endif
     } else if (g_kernel == kDirectCompute) {
-        if (not g_d3d11ComputeController) {
-            g_d3d11ComputeController = new OpenSubdiv::Osd::D3D11ComputeController(g_pd3dDeviceContext);
-        }
-        g_mesh = new OpenSubdiv::Osd::Mesh<OpenSubdiv::Osd::D3D11VertexBuffer,
-                                         OpenSubdiv::Osd::D3D11ComputeController,
-                                         OpenSubdiv::Osd::D3D11DrawContext>(
-                                                g_d3d11ComputeController,
-                                                refiner,
-                                                numVertexElements,
-                                                numVaryingElements,
-                                                level, bits, g_pd3dDeviceContext);
+        static Osd::EvaluatorCacheT<Osd::D3D11ComputeEvaluator> d3d11ComputeEvaluatorCache;
+        g_mesh = new Osd::Mesh<Osd::D3D11VertexBuffer,
+                               Osd::D3D11StencilTable,
+                               Osd::D3D11ComputeEvaluator,
+                               Osd::D3D11PatchTable,
+                               ID3D11DeviceContext>(
+                                   refiner,
+                                   numVertexElements,
+                                   numVaryingElements,
+                                   level, bits,
+                                   &d3d11ComputeEvaluatorCache,
+                                   g_pd3dDeviceContext);
     } else {
         printf("Unsupported kernel %s\n", getKernelName(kernel));
     }
@@ -767,20 +894,11 @@ createOsdMesh(int level, int kernel) {
 
 //------------------------------------------------------------------------------
 static void
-bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patch) {
+bindProgram(Effect effect, OpenSubdiv::Osd::PatchArray const & patch) {
 
     EffectDesc effectDesc(patch.GetDescriptor(), effect);
 
-    // input layout
-    const D3D11_INPUT_ELEMENT_DESC hInElementDesc[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 4*3, D3D11_INPUT_PER_VERTEX_DATA, 0 }
-    };
-
-    EffectDrawRegistry::ConfigType *
-        config = effectRegistry.GetDrawConfig(
-                effectDesc, g_pd3dDevice,
-                &g_pInputLayout, hInElementDesc, ARRAYSIZE(hInElementDesc));
+    D3D11DrawConfig *config = g_shaderCache.GetDrawConfig(effectDesc);
 
     assert(g_pInputLayout);
 
@@ -792,6 +910,7 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
             float ModelViewMatrix[16];
             float ProjectionMatrix[16];
             float ModelViewProjectionMatrix[16];
+            float ModelViewInverseMatrix[16];
         };
 
         if (! g_pcbPerFrame) {
@@ -815,12 +934,18 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
         translate(pData->ModelViewMatrix, -g_pan[0], -g_pan[1], -g_dolly);
         rotate(pData->ModelViewMatrix, g_rotate[1], 1, 0, 0);
         rotate(pData->ModelViewMatrix, g_rotate[0], 0, 1, 0);
+        if (!g_yup) {
+            rotate(pData->ModelViewMatrix, -90, 1, 0, 0);
+        }
         translate(pData->ModelViewMatrix, -g_center[0], -g_center[1], -g_center[2]);
 
         identity(pData->ProjectionMatrix);
-        perspective(pData->ProjectionMatrix, 45.0, aspect, 0.01f, 500.0);
-        multMatrix(pData->ModelViewProjectionMatrix, pData->ModelViewMatrix, pData->ProjectionMatrix);
-
+        perspective(pData->ProjectionMatrix, 45.0, aspect, g_size*0.001f, g_size+g_dolly);
+        multMatrix(pData->ModelViewProjectionMatrix,
+                   pData->ModelViewMatrix,
+                   pData->ProjectionMatrix);
+        inverseMatrix(pData->ModelViewInverseMatrix,
+                      pData->ModelViewMatrix);
         g_pd3dDeviceContext->Unmap( g_pcbPerFrame, 0 );
     }
 
@@ -829,7 +954,6 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
         __declspec(align(16))
         struct Tessellation {
             float TessLevel;
-            int GregoryQuadOffsetBase;
             int PrimitiveIdBase;
         };
 
@@ -850,8 +974,7 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
         Tessellation * pData = ( Tessellation* )MappedResource.pData;
 
         pData->TessLevel = static_cast<float>(1 << g_tessLevel);
-        pData->GregoryQuadOffsetBase = patch.GetQuadOffsetIndex();
-        pData->PrimitiveIdBase = patch.GetPatchIndex();
+        pData->PrimitiveIdBase = patch.GetPrimitiveIdBase();
 
         g_pd3dDeviceContext->Unmap( g_pcbTessellation, 0 );
     }
@@ -888,34 +1011,27 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
 
     g_pd3dDeviceContext->IASetInputLayout(g_pInputLayout);
 
-    g_pd3dDeviceContext->VSSetShader(config->vertexShader, NULL, 0);
+    g_pd3dDeviceContext->VSSetShader(config->GetVertexShader(), NULL, 0);
     g_pd3dDeviceContext->VSSetConstantBuffers(0, 1, &g_pcbPerFrame);
-    g_pd3dDeviceContext->HSSetShader(config->hullShader, NULL, 0);
+    g_pd3dDeviceContext->HSSetShader(config->GetHullShader(), NULL, 0);
     g_pd3dDeviceContext->HSSetConstantBuffers(0, 1, &g_pcbPerFrame);
     g_pd3dDeviceContext->HSSetConstantBuffers(1, 1, &g_pcbTessellation);
-    g_pd3dDeviceContext->DSSetShader(config->domainShader, NULL, 0);
+    g_pd3dDeviceContext->DSSetShader(config->GetDomainShader(), NULL, 0);
     g_pd3dDeviceContext->DSSetConstantBuffers(0, 1, &g_pcbPerFrame);
     g_pd3dDeviceContext->DSSetConstantBuffers(3, 1, &g_pcbConfig);
-    g_pd3dDeviceContext->GSSetShader(config->geometryShader, NULL, 0);
+    g_pd3dDeviceContext->GSSetShader(config->GetGeometryShader(), NULL, 0);
     g_pd3dDeviceContext->GSSetConstantBuffers(0, 1, &g_pcbPerFrame);
-    g_pd3dDeviceContext->PSSetShader(config->pixelShader, NULL, 0);
+    g_pd3dDeviceContext->PSSetShader(config->GetPixelShader(), NULL, 0);
     g_pd3dDeviceContext->PSSetConstantBuffers(0, 1, &g_pcbPerFrame);
     g_pd3dDeviceContext->PSSetConstantBuffers(2, 1, &g_pcbLighting);
     g_pd3dDeviceContext->PSSetConstantBuffers(3, 1, &g_pcbConfig);
 
-    if (g_mesh->GetDrawContext()->vertexBufferSRV) {
-        g_pd3dDeviceContext->VSSetShaderResources(0, 1, &g_mesh->GetDrawContext()->vertexBufferSRV);
-    }
-    if (g_mesh->GetDrawContext()->vertexValenceBufferSRV) {
-        g_pd3dDeviceContext->VSSetShaderResources(1, 1, &g_mesh->GetDrawContext()->vertexValenceBufferSRV);
-    }
-    if (g_mesh->GetDrawContext()->quadOffsetBufferSRV) {
-        g_pd3dDeviceContext->HSSetShaderResources(2, 1, &g_mesh->GetDrawContext()->quadOffsetBufferSRV);
-    }
-    if (g_mesh->GetDrawContext()->ptexCoordinateBufferSRV) {
-        g_pd3dDeviceContext->HSSetShaderResources(3, 1, &g_mesh->GetDrawContext()->ptexCoordinateBufferSRV);
-        g_pd3dDeviceContext->DSSetShaderResources(3, 1, &g_mesh->GetDrawContext()->ptexCoordinateBufferSRV);
-        g_pd3dDeviceContext->GSSetShaderResources(3, 1, &g_mesh->GetDrawContext()->ptexCoordinateBufferSRV);
+    ID3D11ShaderResourceView *srv = g_mesh->GetPatchTable()->GetPatchParamSRV();
+    if (srv) {
+        g_pd3dDeviceContext->HSSetShaderResources(0, 1, &srv);
+        g_pd3dDeviceContext->DSSetShaderResources(0, 1, &srv);
+        g_pd3dDeviceContext->GSSetShaderResources(0, 1, &srv);
+        g_pd3dDeviceContext->PSSetShaderResources(0, 1, &srv);
     }
 
     g_pd3dDeviceContext->PSSetShaderResources(4, 1, g_osdPTexImage->GetTexelsSRV());
@@ -937,6 +1053,19 @@ bindProgram(Effect effect, OpenSubdiv::Osd::DrawContext::PatchArray const & patc
         g_pd3dDeviceContext->PSSetShaderResources(10, 1, g_osdPTexSpecular->GetTexelsSRV());
         g_pd3dDeviceContext->PSSetShaderResources(11, 1, g_osdPTexSpecular->GetLayoutSRV());
     }
+
+    if (g_ibl) {
+        if (g_diffuseEnvironmentMap) {
+            g_pd3dDeviceContext->PSSetShaderResources(12, 1, &g_diffuseEnvironmentSRV);
+
+        }
+        if (g_specularEnvironmentMap) {
+            g_pd3dDeviceContext->PSSetShaderResources(13, 1, &g_specularEnvironmentSRV);
+
+        }
+        assert(g_iblSampler);
+        g_pd3dDeviceContext->PSSetSamplers(0, 1, &g_iblSampler);
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -950,21 +1079,30 @@ drawModel() {
     UINT hOffsets = 0;
     g_pd3dDeviceContext->IASetVertexBuffers(0, 1, &buffer, &hStrides, &hOffsets);
 
-    OpenSubdiv::Osd::DrawContext::PatchArrayVector const & patches =
-        g_mesh->GetDrawContext()->GetPatchArrays();
+    OpenSubdiv::Osd::PatchArrayVector const & patches =
+        g_mesh->GetPatchTable()->GetPatchArrays();
 
-    g_pd3dDeviceContext->IASetIndexBuffer(g_mesh->GetDrawContext()->patchIndexBuffer,
-                                          DXGI_FORMAT_R32_UINT, 0);
+    g_pd3dDeviceContext->IASetIndexBuffer(
+        g_mesh->GetPatchTable()->GetPatchIndexBuffer(),
+        DXGI_FORMAT_R32_UINT, 0);
 
     // patch drawing
     for (int i = 0; i < (int)patches.size(); ++i) {
-        OpenSubdiv::Osd::DrawContext::PatchArray const & patch = patches[i];
+        OpenSubdiv::Osd::PatchArray const & patch = patches[i];
+        OpenSubdiv::Far::PatchDescriptor desc = patch.GetDescriptor();
+        OpenSubdiv::Far::PatchDescriptor::Type patchType = desc.GetType();
 
         D3D11_PRIMITIVE_TOPOLOGY topology;
-        // if (patch.GetDescriptor().GetType() != OpenSubdiv::Far::PatchTables::REGULAR) continue;
 
-        if (g_mesh->GetDrawContext()->IsAdaptive()) {
-            switch (patch.GetDescriptor().GetNumControlVertices()) {
+        switch (patchType) {
+        case OpenSubdiv::Far::PatchDescriptor::TRIANGLES:
+            topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+            break;
+        case OpenSubdiv::Far::PatchDescriptor::QUADS:
+            topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ;
+            break;
+        default:
+            switch (desc.GetNumControlVertices()) {
             case 4:
                 topology = D3D11_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST;
                 break;
@@ -977,16 +1115,14 @@ drawModel() {
             case 16:
                 topology = D3D11_PRIMITIVE_TOPOLOGY_16_CONTROL_POINT_PATCHLIST;
                 break;
+            case 20:
+                topology = D3D11_PRIMITIVE_TOPOLOGY_20_CONTROL_POINT_PATCHLIST;
+                break;
             default:
                 assert(false);
                 break;
             }
-        } else {
-            if (g_scheme == kLoop) {
-                topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-            } else {
-                topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ;
-            }
+            break;
         }
 
         Effect effect;
@@ -1009,8 +1145,10 @@ drawModel() {
 
         g_pd3dDeviceContext->IASetPrimitiveTopology(topology);
 
-        g_pd3dDeviceContext->DrawIndexed(patch.GetNumIndices(),
-                                         patch.GetVertIndex(), 0);
+        g_pd3dDeviceContext->DrawIndexed(
+            patch.GetNumPatches() * desc.GetNumControlVertices(),
+            patch.GetIndexBase(), 0);
+
     }
 }
 
@@ -1018,27 +1156,100 @@ drawModel() {
 static void
 display() {
 
+    Stopwatch s;
+    s.Start();
+
     float color[4] = {0.006f, 0.006f, 0.006f, 1.0f};
     g_pd3dDeviceContext->ClearRenderTargetView(g_pSwapChainRTV, color);
 
     // Clear the depth buffer.
     g_pd3dDeviceContext->ClearDepthStencilView(g_pDepthStencilView, D3D11_CLEAR_DEPTH, 1.0f, 0);
 
+    if (g_ibl && g_sky) {
+
+        float modelView[16], projection[16], mvp[16];
+        double aspect = g_width/(double)g_height;
+
+        identity(modelView);
+        rotate(modelView, g_rotate[1], 1, 0, 0);
+        rotate(modelView, g_rotate[0], 0, 1, 0);
+        perspective(projection, 45.0f, (float)aspect, g_size*0.001f, g_size+g_dolly);
+        multMatrix(mvp, modelView, projection);
+
+        g_sky->Draw(g_pd3dDeviceContext, mvp);
+    }
+
+// this query can be slow : comment out #define to turn off
+#define PIPELINE_STATISTICS
+#ifdef PIPELINE_STATISTICS
+    g_pd3dDeviceContext->Begin(g_pipelineStatsQuery);
+#endif // PIPELINE_STATISTICS
+
     g_pd3dDeviceContext->OMSetDepthStencilState(g_pDepthStencilState, 1);
     g_pd3dDeviceContext->RSSetState(g_pRasterizerState);
 
     drawModel();
 
+#ifdef PIPELINE_STATISTICS
+    g_pd3dDeviceContext->End(g_pipelineStatsQuery);
+#endif // PIPELINE_STATISTICS
 
-    if (g_hud->IsVisible()) {
+    s.Stop();
+    float drawCpuTime = float(s.GetElapsed() * 1000.0f);
+
+    int timeElapsed = 0;
+    // XXXX TODO GPU cycles elapsed query
+    float drawGpuTime = timeElapsed / 1000.0f / 1000.0f;
+
+    UINT64 numPrimsGenerated = 0;
+#ifdef PIPELINE_STATISTICS
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS pipelineStats;
+    ZeroMemory(&pipelineStats, sizeof(pipelineStats));
+    while (S_OK != g_pd3dDeviceContext->GetData(g_pipelineStatsQuery, &pipelineStats, g_pipelineStatsQuery->GetDataSize(), 0));
+    numPrimsGenerated = pipelineStats.GSPrimitives;
+#endif // PIPELINE_STATISTICS
+
         g_fpsTimer.Stop();
-        double fps = 1.0/g_fpsTimer.GetElapsed();
+    float elapsed = (float)g_fpsTimer.GetElapsed();
+    if (!g_freeze)
+        g_animTime += elapsed;
         g_fpsTimer.Start();
 
-        g_hud->DrawString(10, -100, "# of Vertices = %d", g_mesh->GetNumVertices());
-        g_hud->DrawString(10, -60, "GPU TIME = %.3f ms", g_gpuTime);
-        g_hud->DrawString(10, -40, "CPU TIME = %.3f ms", g_cpuTime);
-        g_hud->DrawString(10, -20, "FPS = %3.1f", fps);
+
+    if (g_hud->IsVisible()) {
+
+        double fps = 1.0/elapsed;
+
+        // Avereage fps over a defined number of time samples for
+        // easier reading in the HUD
+        g_fpsTimeSamples[g_currentFpsTimeSample++] = float(fps);
+        if (g_currentFpsTimeSample >= NUM_FPS_TIME_SAMPLES)
+            g_currentFpsTimeSample = 0;
+        double averageFps = 0;
+        for (int i = 0; i < NUM_FPS_TIME_SAMPLES; ++i) {
+            averageFps += g_fpsTimeSamples[i]/(float)NUM_FPS_TIME_SAMPLES;
+        }
+
+        g_hud->DrawString(10, -220, "Ptex memory use : %.1f mb", g_ptexMemoryUsage/1024.0/1024.0);
+        g_hud->DrawString(10, -180, "Tess level (+/-): %d", g_tessLevel);
+#ifdef PIPELINE_STATISTICS
+        if (numPrimsGenerated > 1000000) {
+            g_hud->DrawString(10, -160, "Primitives      : %3.1f million",
+                             (float)numPrimsGenerated/1000000.0);
+        } else if (numPrimsGenerated > 1000) {
+            g_hud->DrawString(10, -160, "Primitives      : %3.1f thousand",
+                             (float)numPrimsGenerated/1000.0);
+        } else {
+            g_hud->DrawString(10, -160, "Primitives      : %d", numPrimsGenerated);
+        }
+#endif // PIPELINE_STATISTICS
+        g_hud->DrawString(10, -140, "Vertices        : %d", g_mesh->GetNumVertices());
+        g_hud->DrawString(10, -120, "Scheme          : %s", g_scheme == 0 ? "CATMARK" : "LOOP");
+        g_hud->DrawString(10, -100, "GPU Kernel      : %.3f ms", g_gpuTime);
+        g_hud->DrawString(10, -80,  "CPU Kernel      : %.3f ms", g_cpuTime);
+        g_hud->DrawString(10, -60,  "GPU Draw        : %.3f ms", drawGpuTime);
+        g_hud->DrawString(10, -40,  "CPU Draw        : %.3f ms", drawCpuTime);
+        g_hud->DrawString(10, -20,  "FPS             : %3.1f", fps);
     }
 
     g_hud->Flush();
@@ -1077,7 +1288,7 @@ motion(int x, int y) {
         // pan
         g_pan[0] -= g_dolly*(x - g_prev_x)/g_width;
         g_pan[1] += g_dolly*(y - g_prev_y)/g_height;
-    } else if ((g_mbutton[0] && g_mbutton[1] && !g_mbutton[2]) or
+    } else if ((g_mbutton[0] && g_mbutton[1] && !g_mbutton[2]) ||
                (!g_mbutton[0] && !g_mbutton[1] && g_mbutton[2])) {
         // dolly
         g_dolly -= g_dolly*0.01f*(x - g_prev_x);
@@ -1116,24 +1327,6 @@ quit() {
     SAFE_RELEASE(g_pd3dDeviceContext);
     SAFE_RELEASE(g_pd3dDevice);
 
-    delete g_cpuComputeController;
-
-#ifdef OPENSUBDIV_HAS_OPENMP
-    delete g_ompComputeController;
-#endif
-
-#ifdef OPENSUBDIV_HAS_OPENCL
-    delete g_clComputeController;
-    uninitCL(g_clContext, g_clQueue);
-#endif
-
-#ifdef OPENSUBDIV_HAS_CUDA
-    delete g_cudaComputeController;
-    cudaDeviceReset();
-#endif
-
-    delete g_d3d11ComputeController;
-
     PostQuitMessage(0);
     exit(0);
 }
@@ -1166,17 +1359,19 @@ callbackKernel(int k) {
     g_kernel = k;
 
 #ifdef OPENSUBDIV_HAS_OPENCL
-    if (g_kernel == kCL and g_clContext == NULL) {
-        if (initCL(&g_clContext, &g_clQueue) == false) {
+    if (g_kernel == kCL && (!g_clDeviceContext.IsInitialized())) {
+        if (g_clDeviceContext.Initialize(g_pd3dDeviceContext) == false) {
             printf("Error in initializing OpenCL\n");
             exit(1);
         }
     }
 #endif
 #ifdef OPENSUBDIV_HAS_CUDA
-    if (g_kernel == kCUDA and g_cudaInitialized == false) {
-        g_cudaInitialized = true;
-        cudaD3D11SetDirect3DDevice( g_pd3dDevice );
+    if (g_kernel == kCUDA && (!g_cudaDeviceContext.IsInitialized())) {
+        if (g_cudaDeviceContext.Initialize(g_pd3dDevice) == false) {
+            printf("Error in initializing Cuda\n");
+            exit(1);
+        }
     }
 #endif
 
@@ -1266,47 +1461,77 @@ initHUD() {
     g_hud = new D3D11hud(g_pd3dDeviceContext);
     g_hud->Init(g_width, g_height);
 
-    g_hud->AddRadioButton(0, "CPU (K)", true, 10, 10, callbackKernel, kCPU, 'K');
-#ifdef OPENSUBDIV_HAS_OPENMP
-    g_hud->AddRadioButton(0, "OPENMP", false, 10, 30, callbackKernel, kOPENMP, 'K');
-#endif
-#ifdef OPENSUBDIV_HAS_CUDA
-    g_hud->AddRadioButton(0, "CUDA",   false, 10, 50, callbackKernel, kCUDA, 'K');
-#endif
-#ifdef OPENSUBDIV_HAS_OPENCL
-    if (HAS_CL_VERSION_1_1()) {
-        g_hud->AddRadioButton(0, "OPENCL", false, 10, 70, callbackKernel, kCL, 'K');
+
+    if (g_osdPTexOcclusion != NULL) {
+        g_hud->AddCheckBox("Ambient Occlusion (A)", g_occlusion,
+                          -200, 570, callbackCheckBox, HUD_CB_DISPLAY_OCCLUSION, 'a');
     }
-#endif
-    g_hud->AddRadioButton(0, "DirectCompute", false, 10, 90, callbackKernel, kDirectCompute, 'K');
+    if (g_osdPTexSpecular != NULL)
+        g_hud->AddCheckBox("Specular (S)", g_specular,
+                          -200, 590, callbackCheckBox, HUD_CB_DISPLAY_SPECULAR, 's');
+
+    if (g_diffuseEnvironmentMap || g_diffuseEnvironmentMap) {
+        g_hud->AddCheckBox("IBL (I)", g_ibl,
+                          -200, 610, callbackCheckBox, HUD_CB_IBL, 'i');
+    }
+
+    g_hud->AddCheckBox("Animate vertices (M)", g_moveScale != 0.0,
+                      10, 30, callbackCheckBox, HUD_CB_ANIMATE_VERTICES, 'm');
+    g_hud->AddCheckBox("Screen space LOD (V)",  g_screenSpaceTess,
+                      10, 50, callbackCheckBox, HUD_CB_VIEW_LOD, 'v');
+    g_hud->AddCheckBox("Fractional spacing (T)",  g_fractionalSpacing,
+                      10, 70, callbackCheckBox, HUD_CB_FRACTIONAL_SPACING, 't');
+    g_hud->AddCheckBox("Frustum Patch Culling (B)",  g_patchCull,
+                      10, 90, callbackCheckBox, HUD_CB_PATCH_CULL, 'b');
+    g_hud->AddCheckBox("Bloom (Y)", g_bloom,
+                      10, 110, callbackCheckBox, HUD_CB_BLOOM, 'y');
+    g_hud->AddCheckBox("Freeze (spc)", g_freeze,
+                      10, 130, callbackCheckBox, HUD_CB_FREEZE, ' ');
+
+    g_hud->AddRadioButton(HUD_RB_SCHEME, "CATMARK", true, 10, 190, callbackScheme, 0);
+    g_hud->AddRadioButton(HUD_RB_SCHEME, "BILINEAR", false, 10, 210, callbackScheme, 1);
 
     g_hud->AddCheckBox("Adaptive (`)", g_adaptive,
-                       10, 150, callbackCheckBox, HUD_CB_ADAPTIVE, '`');
-
-    g_hud->AddRadioButton(HUD_RB_SCHEME, "CATMARK", true, 10, 190, callbackScheme, 0, 's');
-    g_hud->AddRadioButton(HUD_RB_SCHEME, "BILINEAR", false, 10, 210, callbackScheme, 1, 's');
+                       10, 300, callbackCheckBox, HUD_CB_ADAPTIVE, '`');
 
     for (int i = 1; i < 8; ++i) {
         char level[16];
         sprintf(level, "Lv. %d", i);
         g_hud->AddRadioButton(HUD_RB_LEVEL, level, i == g_level,
-                              10, 220+i*20, callbackLevel, i, '0'+i);
+                              10, 320+i*20, callbackLevel, i, '0'+i);
     }
 
-    g_hud->AddRadioButton(HUD_RB_WIRE, "Wire (W)",       (g_wire == DISPLAY_WIRE),
-                         100, 10, callbackWireframe, 0, 'w');
-    g_hud->AddRadioButton(HUD_RB_WIRE, "Shaded",         (g_wire == DISPLAY_SHADED),
-                         100, 30, callbackWireframe, 1, 'w');
-    g_hud->AddRadioButton(HUD_RB_WIRE, "Wire on Shaded", (g_wire == DISPLAY_WIRE_ON_SHADED),
-                         100, 50, callbackWireframe, 2, 'w');
+    int compute_pulldown = g_hud->AddPullDown("Compute (K)", 475, 10, 300, callbackKernel, 'k');
+    g_hud->AddPullDownButton(compute_pulldown, "CPU (K)", kCPU);
+#ifdef OPENSUBDIV_HAS_OPENMP
+    g_hud->AddPullDownButton(compute_pulldown, "OPENMP", kOPENMP);
+#endif
+#ifdef OPENSUBDIV_HAS_TBB
+    g_hud->AddPullDownButton(compute_pulldown, "TBB", kTBB);
+#endif
+#ifdef OPENSUBDIV_HAS_CUDA
+    g_hud->AddPullDownButton(compute_pulldown, "CUDA", kCUDA);
+#endif
+#ifdef OPENSUBDIV_HAS_OPENCL
+    if (CLDeviceContext::HAS_CL_VERSION_1_1()) {
+        g_hud->AddPullDownButton(compute_pulldown, "OPENCL", kCL);
+    }
+#endif
+    g_hud->AddPullDownButton(compute_pulldown, "DirectCompute", kDirectCompute);
+
+    int shading_pulldown = g_hud->AddPullDown("Shading (W)", 250, 10, 250, callbackWireframe, 'w');
+    g_hud->AddPullDownButton(shading_pulldown, "Wire", DISPLAY_WIRE, g_wire==DISPLAY_WIRE);
+    g_hud->AddPullDownButton(shading_pulldown, "Shaded", DISPLAY_SHADED, g_wire==DISPLAY_SHADED);
+    g_hud->AddPullDownButton(shading_pulldown, "Wire+Shaded", DISPLAY_WIRE_ON_SHADED, g_wire==DISPLAY_WIRE_ON_SHADED);
 
     g_hud->AddLabel("Color (C)", -200, 10);
     g_hud->AddRadioButton(HUD_RB_COLOR, "None", (g_color == COLOR_NONE),
                          -200, 30, callbackColor, COLOR_NONE, 'c');
     g_hud->AddRadioButton(HUD_RB_COLOR, "Ptex Nearest", (g_color == COLOR_PTEX_NEAREST),
                          -200, 50, callbackColor, COLOR_PTEX_NEAREST, 'c');
-    g_hud->AddRadioButton(HUD_RB_COLOR, "Ptex HW bilinear", (g_color == COLOR_PTEX_HW_BILINEAR),
-                         -200, 70, callbackColor, COLOR_PTEX_HW_BILINEAR, 'c');
+    // Commented out : we need to add a texture sampler state to make this work
+    //g_hud->AddRadioButton(HUD_RB_COLOR, "Ptex HW bilinear", (g_color == COLOR_PTEX_HW_BILINEAR),
+    //                     -200, 70, callbackColor, COLOR_PTEX_HW_BILINEAR, 'c');
     g_hud->AddRadioButton(HUD_RB_COLOR, "Ptex bilinear", (g_color == COLOR_PTEX_BILINEAR),
                          -200, 90, callbackColor, COLOR_PTEX_BILINEAR, 'c');
     g_hud->AddRadioButton(HUD_RB_COLOR, "Ptex biquadratic", (g_color == COLOR_PTEX_BIQUADRATIC),
@@ -1323,9 +1548,10 @@ initHUD() {
         g_hud->AddRadioButton(HUD_RB_DISPLACEMENT, "None",
                              (g_displacement == DISPLACEMENT_NONE),
                              -200, 220, callbackDisplacement, DISPLACEMENT_NONE, 'd');
-        g_hud->AddRadioButton(HUD_RB_DISPLACEMENT, "HW bilinear",
-                             (g_displacement == DISPLACEMENT_HW_BILINEAR),
-                             -200, 240, callbackDisplacement, DISPLACEMENT_HW_BILINEAR, 'd');
+        // Commented out : we need to add a texture sampler state to make this work
+        //g_hud->AddRadioButton(HUD_RB_DISPLACEMENT, "HW bilinear",
+        //                     (g_displacement == DISPLACEMENT_HW_BILINEAR),
+        //                     -200, 240, callbackDisplacement, DISPLACEMENT_HW_BILINEAR, 'd');
         g_hud->AddRadioButton(HUD_RB_DISPLACEMENT, "Bilinear",
                              (g_displacement == DISPLACEMENT_BILINEAR),
                              -200, 260, callbackDisplacement, DISPLACEMENT_BILINEAR, 'd');
@@ -1361,24 +1587,6 @@ initHUD() {
     g_hud->AddCheckBox("Seamless Mipmap", g_seamless,
                        -200, 530, callbackCheckBox, HUD_CB_SEAMLESS_MIPMAP, 'j');
 
-    if (g_osdPTexOcclusion != NULL) {
-        g_hud->AddCheckBox("Ambient Occlusion (A)", g_occlusion,
-                          250, 10, callbackCheckBox, HUD_CB_DISPLAY_OCCLUSION, 'a');
-    }
-    if (g_osdPTexSpecular != NULL)
-        g_hud->AddCheckBox("Specular (S)", g_specular,
-                          250, 30, callbackCheckBox, HUD_CB_DISPLAY_SPECULAR, 's');
-
-    g_hud->AddCheckBox("Animate vertices (M)", g_moveScale != 0.0,
-                      450, 10, callbackCheckBox, HUD_CB_ANIMATE_VERTICES, 'm');
-    g_hud->AddCheckBox("Screen space LOD (V)",  g_screenSpaceTess,
-                      450, 30, callbackCheckBox, HUD_CB_VIEW_LOD, 'v');
-    g_hud->AddCheckBox("Fractional spacing (T)",  g_fractionalSpacing,
-                      450, 50, callbackCheckBox, HUD_CB_FRACTIONAL_SPACING, 't');
-    g_hud->AddCheckBox("Frustum Patch Culling (B)",  g_patchCull,
-                      450, 70, callbackCheckBox, HUD_CB_PATCH_CULL, 'b');
-    g_hud->AddCheckBox("Freeze (spc)", g_freeze,
-                      450, 90, callbackCheckBox, HUD_CB_FREEZE, ' ');
 }
 
 //------------------------------------------------------------------------------
@@ -1393,9 +1601,18 @@ initD3D11(HWND hWnd) {
 
     UINT numDriverTypes = ARRAYSIZE(driverTypes);
 
+    int width = g_width,
+        height = g_height;
+    if (g_fullscreen) {
+        HWND const desktop = GetDesktopWindow();
+        RECT rect;
+        GetWindowRect(desktop, &rect);
+        width = (int)rect.right;
+        height = (int)rect.bottom;
+    }
     DXGI_SWAP_CHAIN_DESC hDXGISwapChainDesc;
-    hDXGISwapChainDesc.BufferDesc.Width = g_width;
-    hDXGISwapChainDesc.BufferDesc.Height = g_height;
+    hDXGISwapChainDesc.BufferDesc.Width = width;
+    hDXGISwapChainDesc.BufferDesc.Height = height;
     hDXGISwapChainDesc.BufferDesc.RefreshRate.Numerator  = 0;
     hDXGISwapChainDesc.BufferDesc.RefreshRate.Denominator = 1;
     hDXGISwapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
@@ -1406,7 +1623,7 @@ initD3D11(HWND hWnd) {
     hDXGISwapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     hDXGISwapChainDesc.BufferCount = 1;
     hDXGISwapChainDesc.OutputWindow = hWnd;
-    hDXGISwapChainDesc.Windowed = TRUE;
+    hDXGISwapChainDesc.Windowed = !g_fullscreen;
     hDXGISwapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     hDXGISwapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
 
@@ -1416,8 +1633,13 @@ initD3D11(HWND hWnd) {
     D3D_FEATURE_LEVEL hFeatureLevel = D3D_FEATURE_LEVEL_11_0;
     for(UINT driverTypeIndex=0; driverTypeIndex < numDriverTypes; driverTypeIndex++){
         hDriverType = driverTypes[driverTypeIndex];
+        unsigned int deviceFlags = 0;
+#ifndef NDEBUG
+                // XXX: this is problematic in some environments.
+//                deviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
         hr = D3D11CreateDeviceAndSwapChain(NULL,
-                                           hDriverType, NULL, 0, NULL, 0,
+                                           hDriverType, NULL, deviceFlags, NULL, 0,
                                            D3D11_SDK_VERSION, &hDXGISwapChainDesc,
                                            &g_pSwapChain, &g_pd3dDevice,
                                            &hFeatureLevel, &g_pd3dDeviceContext);
@@ -1431,11 +1653,37 @@ initD3D11(HWND hWnd) {
         return false;
     }
 
+#ifndef NDEBUG
+    // set break points on directx errors
+    ID3D11Debug *d3dDebug = nullptr;
+    hr = g_pd3dDevice->QueryInterface(__uuidof(ID3D11Debug), (void**)&d3dDebug);
+    if (SUCCEEDED(hr)) {
+        ID3D11InfoQueue *d3dInfoQueue = nullptr;
+        hr = d3dDebug->QueryInterface(__uuidof(ID3D11InfoQueue), (void**)&d3dInfoQueue);
+        if (SUCCEEDED(hr)) {
+
+            d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, true);
+            d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR, true);
+            d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, true);
+
+            D3D11_MESSAGE_ID denied[] = { D3D11_MESSAGE_ID_SETPRIVATEDATA_CHANGINGPARAMS };
+            D3D11_INFO_QUEUE_FILTER filter;
+            memset(&filter, 0, sizeof(filter));
+            filter.DenyList.NumIDs = _countof(denied);
+            filter.DenyList.pIDList = denied;
+            d3dInfoQueue->AddStorageFilterEntries(&filter);
+
+            d3dInfoQueue->Release();
+        }
+        d3dDebug->Release();
+    }
+#endif
+
     // create rasterizer
     D3D11_RASTERIZER_DESC rasterDesc;
     ZeroMemory(&rasterDesc, sizeof(rasterDesc));
     rasterDesc.AntialiasedLineEnable = false;
-    rasterDesc.CullMode = D3D11_CULL_NONE; // XXX
+    rasterDesc.CullMode = D3D11_CULL_BACK;
     rasterDesc.DepthBias = 0;
     rasterDesc.DepthBiasClamp = 0.0f;
     rasterDesc.DepthClipEnable = true;
@@ -1490,6 +1738,14 @@ initD3D11(HWND hWnd) {
 
     g_pd3dDevice->CreateDepthStencilState(&depthStencilDesc, &g_pDepthStencilState);
     assert(g_pDepthStencilState);
+
+#ifdef PIPELINE_STATISTICS
+    // Create pipeline statistics query
+    D3D11_QUERY_DESC queryDesc;
+    ZeroMemory(&queryDesc, sizeof(D3D11_QUERY_DESC));
+    queryDesc.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+    g_pd3dDevice->CreateQuery(&queryDesc, &g_pipelineStatsQuery);
+#endif // PIPELINE_STATISTICS
 
     return true;
 }
@@ -1573,10 +1829,9 @@ updateRenderTarget(HWND hWnd) {
 
 //------------------------------------------------------------------------------
 static void
-callbackError(OpenSubdiv::Osd::ErrorType err, const char *message) {
-
+callbackError(OpenSubdiv::Far::ErrorType err, const char *message) {
     std::ostringstream s;
-    s << "OsdError: " << err << "\n";
+    s << "Error: " << err << "\n";
     s << message;
     OutputDebugString(s.str().c_str());
 }
@@ -1634,6 +1889,22 @@ tokenize(std::string const & src) {
     return result;
 }
 
+//------------------------------------------------------------------------------
+void usage(const char *program) {
+    printf("Usage: %s [options] <color.ptx> [<displacement.ptx>] [occlusion.ptx>] "
+           "[specular.ptx] [pose.obj]...\n", program);
+    printf("Options:  -l level                : subdivision level\n");
+    printf("          -c count                : frame count until exit (for profiler)\n");
+    printf("          -d <diffseEnvMap.hdr>   : diffuse environment map for IBL\n");
+    printf("          -e <specularEnvMap.hdr> : specular environment map for IBL\n");
+    printf("          -yup                    : Y-up model\n");
+    printf("          -m level                : max mimmap level (default=10)\n");
+    printf("          -x <ptex limit MB>      : ptex target memory size\n");
+    printf("          --disp <scale>          : Displacment scale\n");
+}
+
+//------------------------------------------------------------------------------
+
 int WINAPI
 WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow) {
 
@@ -1652,7 +1923,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
     wcex.lpszClassName  = szWindowClass;
     RegisterClass(&wcex);
 
-    // crete window
+    // create window
     RECT rect = { 0, 0, g_width, g_height };
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
 
@@ -1670,49 +1941,56 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
                         hInstance,
                         NULL);
 
-    std::vector<std::string> argv = tokenize(lpCmdLine);
-    std::vector<std::string> animobjs;
     const char *diffuseEnvironmentMap = NULL, *specularEnvironmentMap = NULL;
     const char *colorFilename = NULL, *displacementFilename = NULL,
         *occlusionFilename = NULL, *specularFilename = NULL;
+    int memLimit = 0;
 
-    for (int i = 0; i < (int)argv.size(); ++i) {
-        if (strstr(argv[i].c_str(), ".obj"))
-            animobjs.push_back(argv[i]);
-        else if (argv[i] == "-l")
-            g_level = atoi(argv[++i].c_str());
-        else if (argv[i] == "-c")
-            g_repeatCount = atoi(argv[++i].c_str());
-        else if (argv[i] == "-d")
-            diffuseEnvironmentMap = argv[++i].c_str();
-        else if (argv[i] == "-e")
-            specularEnvironmentMap = argv[++i].c_str();
-        else if (argv[i] == "-y")
-            g_yup = true;
-        else if (argv[i] == "-m")
-            g_maxMipmapLevels = atoi(argv[++i].c_str());
-        else if (argv[i] == "--disp")
-            g_displacementScale = (float)atof(argv[++i].c_str());
-        else if (colorFilename == NULL)
-            colorFilename = argv[i].c_str();
-        else if (displacementFilename == NULL) {
-            displacementFilename = argv[i].c_str();
+    ArgOptions args;
+    args.Parse(__argc, __argv);
+
+    std::vector<const char *> animobjs = args.GetObjFiles();
+    g_fullscreen = args.GetFullScreen();
+
+    g_yup = args.GetYUp();
+    g_adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+    g_repeatCount = args.GetRepeatCount();
+
+    const std::vector<const char *> &argvRem = args.GetRemainingArgs();
+    for (size_t i = 0; i < argvRem.size(); ++i) {
+        if (!strcmp(argvRem[i], "-d")) {
+            diffuseEnvironmentMap = argvRem[++i];
+        } else if (!strcmp(argvRem[i], "-e")) {
+            specularEnvironmentMap = argvRem[++i];
+        } else if (!strcmp(argvRem[i], "-m")) {
+            g_maxMipmapLevels = atoi(argvRem[++i]);
+        } else if (!strcmp(argvRem[i], "-x")) {
+            memLimit = atoi(argvRem[++i]);
+        } else if (!strcmp(argvRem[i], "--disp")) {
+            g_displacementScale = (float)atof(argvRem[++i]);
+        } else if (colorFilename == NULL) {
+            colorFilename = argvRem[i];
+        } else if (displacementFilename == NULL) {
+            displacementFilename = argvRem[i];
             g_displacement = DISPLACEMENT_BILINEAR;
             g_normal = NORMAL_BIQUADRATIC;
         } else if (occlusionFilename == NULL) {
-            occlusionFilename = argv[i].c_str();
+            occlusionFilename = argvRem[i];
             g_occlusion = 1;
         } else if (specularFilename == NULL) {
-            specularFilename = argv[i].c_str();
+            specularFilename = argvRem[i];
             g_specular = 1;
+        } else {
+            args.PrintUnrecognizedArgWarning(argvRem[i]);
         }
     }
 
-    OpenSubdiv::Osd::SetErrorCallback(callbackError);
+    OpenSubdiv::Far::SetErrorCallback(callbackError);
 
     g_ptexColorFilename = colorFilename;
     if (g_ptexColorFilename == NULL) {
-        printf("Usage: \n");
+        usage(__argv[0]);
         return 1;
     }
 
@@ -1721,13 +1999,90 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
     createOsdMesh(g_level, g_kernel);
 
     // load ptex files
-    g_osdPTexImage = createPtex(colorFilename);
+    g_osdPTexImage = createPtex(colorFilename, memLimit);
     if (displacementFilename)
-        g_osdPTexDisplacement = createPtex(displacementFilename);
+        g_osdPTexDisplacement = createPtex(displacementFilename, memLimit);
     if (occlusionFilename)
-        g_osdPTexOcclusion = createPtex(occlusionFilename);
+        g_osdPTexOcclusion = createPtex(occlusionFilename, memLimit);
     if (specularFilename)
-        g_osdPTexSpecular = createPtex(specularFilename);
+        g_osdPTexSpecular = createPtex(specularFilename, memLimit);
+
+    g_ptexMemoryUsage =
+        (g_osdPTexImage ? g_osdPTexImage->GetMemoryUsage() : 0)
+        + (g_osdPTexDisplacement ? g_osdPTexDisplacement->GetMemoryUsage() : 0)
+        + (g_osdPTexOcclusion ? g_osdPTexOcclusion->GetMemoryUsage() : 0)
+        + (g_osdPTexSpecular ? g_osdPTexSpecular->GetMemoryUsage() : 0);
+
+    // load animation obj sequences (optional)
+    if (!animobjs.empty()) {
+        //  The Scheme passed here should ideally match the Ptex geometry
+        //  (not the defaults from the command line), but only the vertex
+        //  positions of the ObjAnim are used, so it is effectively ignored
+        g_objAnim = ObjAnim::Create(animobjs, kCatmark);
+        if (g_objAnim == 0) {
+            printf("Error in reading animation Obj file sequence\n");
+            goto end;
+        }
+
+        const Shape *animShape = g_objAnim->GetShape();
+        if (animShape->verts.size() != g_positions.size()) {
+            printf("Error in animation sequence, "
+                   "does not match ptex vertex count\n");
+            goto end;
+        }
+
+    }
+
+    // IBL textures
+    if (diffuseEnvironmentMap) {
+
+        g_diffuseEnvironmentMap =
+            createHDRTexture(g_pd3dDevice, diffuseEnvironmentMap);
+        assert(g_diffuseEnvironmentMap);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+        ZeroMemory(&srvDesc, sizeof(srvDesc));
+        srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+        g_pd3dDevice->CreateShaderResourceView(g_diffuseEnvironmentMap, &srvDesc, &g_diffuseEnvironmentSRV);
+        assert(g_diffuseEnvironmentSRV);
+    }
+
+    if (specularEnvironmentMap) {
+
+        g_specularEnvironmentMap =
+            createHDRTexture(g_pd3dDevice, specularEnvironmentMap);
+        assert(g_specularEnvironmentMap);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
+        ZeroMemory(&srvDesc, sizeof(srvDesc));
+        srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+        g_pd3dDevice->CreateShaderResourceView(g_specularEnvironmentMap, &srvDesc, &g_specularEnvironmentSRV);
+        assert(g_specularEnvironmentSRV);
+    }
+    
+    if (g_diffuseEnvironmentMap || g_specularEnvironmentMap) {
+
+        // texture sampler
+        D3D11_SAMPLER_DESC samplerDesc;
+        ZeroMemory(&samplerDesc, sizeof(samplerDesc));
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.MaxAnisotropy = 0;
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        samplerDesc.MinLOD = 0;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        samplerDesc.BorderColor[0] = samplerDesc.BorderColor[1] = samplerDesc.BorderColor[2] = samplerDesc.BorderColor[3] = 0.0f;
+        g_pd3dDevice->CreateSamplerState(&samplerDesc, &g_iblSampler);
+
+        g_sky = new Sky(g_pd3dDevice, g_specularEnvironmentMap!=0 ?
+            g_specularEnvironmentMap : g_diffuseEnvironmentMap);
+    }
 
     initHUD();
 
@@ -1743,7 +2098,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
                 TranslateMessage(&msg);
                 DispatchMessage(&msg);
             }
-            if (not g_freeze)
+            if (!g_freeze)
                 g_frame++;
 
             updateGeom();

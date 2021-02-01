@@ -22,10 +22,10 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#include "../osd/cudaGLVertexBuffer.h"
-#include "../osd/error.h"
+#include "glLoader.h"
 
-#include "../osd/opengl.h"
+#include "../osd/cudaGLVertexBuffer.h"
+#include "../far/error.h"
 
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
@@ -40,6 +40,9 @@ namespace Osd {
 CudaGLVertexBuffer::CudaGLVertexBuffer(int numElements, int numVertices)
     : _numElements(numElements), _numVertices(numVertices),
       _vbo(0), _devicePtr(0), _cudaResource(0) {
+
+    // Initialize internal OpenGL loader library if necessary
+    OpenSubdiv::internal::GLLoader::libraryInitializeGL();
 }
 
 CudaGLVertexBuffer::~CudaGLVertexBuffer() {
@@ -50,17 +53,19 @@ CudaGLVertexBuffer::~CudaGLVertexBuffer() {
 }
 
 CudaGLVertexBuffer *
-CudaGLVertexBuffer::Create(int numElements, int numVertices) {
+CudaGLVertexBuffer::Create(int numElements, int numVertices, void *) {
     CudaGLVertexBuffer *instance =
         new CudaGLVertexBuffer(numElements, numVertices);
     if (instance->allocate()) return instance;
-    Error(OSD_CUDA_GL_ERROR,"CudaGLVertexBuffer::Create failed.\n");
+    Far::Error(Far::FAR_RUNTIME_ERROR, "CudaGLVertexBuffer::Create failed.\n");
     delete instance;
     return NULL;
 }
 
 void
-CudaGLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices) {
+CudaGLVertexBuffer::UpdateData(const float *src,
+                               int startVertex, int numVertices,
+                               void * /*deviceContext*/) {
 
     map();
     cudaError_t err = cudaMemcpy((float*)_devicePtr + _numElements * startVertex,
@@ -68,8 +73,9 @@ CudaGLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertice
                                  _numElements * numVertices * sizeof(float),
                                  cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
-        Error(OSD_CUDA_GL_ERROR, "CudaGLVertexBuffer::UpdateData failed. : %s\n",
-                 cudaGetErrorString(err));
+        Far::Error(Far::FAR_RUNTIME_ERROR,
+                   "CudaGLVertexBuffer::UpdateData failed. : %s\n",
+                   cudaGetErrorString(err));
 }
 
 int
@@ -92,7 +98,7 @@ CudaGLVertexBuffer::BindCudaBuffer() {
 }
 
 GLuint
-CudaGLVertexBuffer::BindVBO() {
+CudaGLVertexBuffer::BindVBO(void * /*deviceContext*/) {
 
     unmap();
     return _vbo;
@@ -103,18 +109,20 @@ CudaGLVertexBuffer::allocate() {
 
     int size = _numElements * _numVertices * sizeof(float);
 
-    glGenBuffers(1, &_vbo);
 
-#if defined(GL_EXT_direct_state_access)
-    if (glNamedBufferDataEXT) {
-        glNamedBufferDataEXT(_vbo, size, 0, GL_DYNAMIC_DRAW);
-    } else {
-#else
-    {
+#if defined(GL_ARB_direct_state_access)
+    if (OSD_OPENGL_HAS(ARB_direct_state_access)) {
+        glCreateBuffers(1, &_vbo);
+        glNamedBufferData(_vbo, size, 0, GL_DYNAMIC_DRAW);
+    } else
 #endif
+    {
+        GLint prev = 0;
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev);
+        glGenBuffers(1, &_vbo);
         glBindBuffer(GL_ARRAY_BUFFER, _vbo);
         glBufferData(GL_ARRAY_BUFFER, size, 0, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, prev);
     }
 
     // register vbo as cuda resource
@@ -134,10 +142,14 @@ CudaGLVertexBuffer::map() {
 
     cudaError_t err = cudaGraphicsMapResources(1, &_cudaResource, 0);
     if (err != cudaSuccess)
-        Error(OSD_CUDA_GL_ERROR, "CudaGLVertexBuffer::map failed.\n%s\n", cudaGetErrorString(err));
+        Far::Error(Far::FAR_RUNTIME_ERROR,
+                   "CudaGLVertexBuffer::map failed.\n%s\n",
+                   cudaGetErrorString(err));
     err = cudaGraphicsResourceGetMappedPointer(&ptr, &num_bytes, _cudaResource);
     if (err != cudaSuccess)
-        Error(OSD_CUDA_GL_ERROR, "CudaGLVertexBuffer::map failed.\n%s\n", cudaGetErrorString(err));
+        Far::Error(Far::FAR_RUNTIME_ERROR,
+                   "CudaGLVertexBuffer::map failed.\n%s\n",
+                   cudaGetErrorString(err));
     _devicePtr = ptr;
 }
 
@@ -147,7 +159,9 @@ CudaGLVertexBuffer::unmap() {
     if (_devicePtr == NULL) return;
     cudaError_t err = cudaGraphicsUnmapResources(1, &_cudaResource, 0);
     if (err != cudaSuccess)
-        Error(OSD_CUDA_GL_ERROR, "CudaGLVertexBuffer::unmap failed.\n%s\n", cudaGetErrorString(err));
+       Far::Error(Far::FAR_RUNTIME_ERROR,
+                  "CudaGLVertexBuffer::unmap failed.\n%s\n",
+                  cudaGetErrorString(err));
     _devicePtr = NULL;
 }
 

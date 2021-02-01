@@ -22,9 +22,9 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#include "../osd/clGLVertexBuffer.h"
+#include "glLoader.h"
 
-#include "../osd/opengl.h"
+#include "../osd/clGLVertexBuffer.h"
 
 #include <cassert>
 
@@ -39,6 +39,8 @@ CLGLVertexBuffer::CLGLVertexBuffer(int numElements,
     : _numElements(numElements), _numVertices(numVertices),
       _vbo(0), _clQueue(0), _clMemory(0), _clMapped(false) {
 
+    // Initialize internal OpenGL loader library if necessary
+    OpenSubdiv::internal::GLLoader::libraryInitializeGL();
 }
 
 CLGLVertexBuffer::~CLGLVertexBuffer() {
@@ -59,7 +61,8 @@ CLGLVertexBuffer::Create(int numElements, int numVertices, cl_context clContext)
 }
 
 void
-CLGLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices, cl_command_queue queue) {
+CLGLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices,
+                             cl_command_queue queue) {
 
     size_t size = numVertices * _numElements * sizeof(float);
     size_t offset = startVertex * _numElements * sizeof(float);
@@ -88,7 +91,7 @@ CLGLVertexBuffer::BindCLBuffer(cl_command_queue queue) {
 }
 
 GLuint
-CLGLVertexBuffer::BindVBO() {
+CLGLVertexBuffer::BindVBO(void * /*deviceContext*/) {
 
     unmap();
     return _vbo;
@@ -102,16 +105,16 @@ CLGLVertexBuffer::allocate(cl_context clContext) {
     // create GL buffer first
     int size = _numElements * _numVertices * sizeof(float);
 
-    glGenBuffers(1, &_vbo);
-#if defined(GL_EXT_direct_state_access)
-    if (glNamedBufferDataEXT) {
-        glNamedBufferDataEXT(_vbo, size, 0, GL_DYNAMIC_DRAW);
-    } else {
-#else
-    {
+#if defined(GL_ARB_direct_state_access)
+    if (OSD_OPENGL_HAS(ARB_direct_state_access)) {
+        glCreateBuffers(1, &_vbo);
+        glNamedBufferData(_vbo, size, 0, GL_DYNAMIC_DRAW);
+    } else
 #endif
+    {
         GLint prev = 0;
         glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev);
+        glGenBuffers(1, &_vbo);
         glBindBuffer(GL_ARRAY_BUFFER, _vbo);
         glBufferData(GL_ARRAY_BUFFER, size, 0, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, prev);
@@ -138,7 +141,7 @@ CLGLVertexBuffer::map(cl_command_queue queue) {
 void
 CLGLVertexBuffer::unmap() {
 
-    if (not _clMapped) return;
+    if (! _clMapped) return;
     clEnqueueReleaseGLObjects(_clQueue, 1, &_clMemory, 0, 0, 0);
     _clMapped = false;
 }

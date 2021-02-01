@@ -21,8 +21,8 @@
 //   KIND, either express or implied. See the Apache License for the specific
 //   language governing permissions and limitations under the Apache License.
 //
-#ifndef VTR_SPARSE_SELECTOR_H
-#define VTR_SPARSE_SELECTOR_H
+#ifndef OPENSUBDIV3_VTR_SPARSE_SELECTOR_H
+#define OPENSUBDIV3_VTR_SPARSE_SELECTOR_H
 
 #include "../version.h"
 
@@ -35,47 +35,35 @@ namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
 
 namespace Vtr {
-
-class Refinement;
+namespace internal {
 
 //
 //  SparseSelector:
-//      This is experimental at present -- just keeping all of the functionality related to sparse
-//  refinment out of Refinement for now until it matures.
+//      Class supporting "selection" of components in a Level for sparse Refinement.
+//  The term "selection" here implies interest in the limit for that component, i.e.
+//  the limit point for a selected vertex, the limit patch for a face, etc.  So this
+//  class is responsible for ensuring that all neighboring components required to
+//  support the limit of those selected are included in the refinement.
 //
-//  Expected usage is as follows:
+//  This class is associated with (and constructed given) a Refinement and its role
+//  is to initialize that Refinement instance for eventual sparse refinement.  So it
+//  is a friend of and expected to modify the Refinement as part of the selection.
+//  Given its simplicity and scope it may be worth nesting it in Vtr::Refinement.
 //
-//          SparseSelector selector(refinement);
-//
-//          selector.selectFace(i);
-//          selector.selectFace(j);
-//          ...
-//
-//          //  To be later followed by:
-//          refinement.refine(usingSparseSelectionOptions);
-//
-//  Since it is expected this will be protected or integrated elsewhere into another Vtr class --
-//  which will be similarly protected -- all methods intentionally begin with lower case.
+//  While all three component types -- vertices, edges and faces -- can be selected,
+//  only selection of faces is currently used and actively supported as part of the
+//  feature-adaptive refinement.
 //
 class SparseSelector {
 
 public:
-    SparseSelector(Refinement& refine) : _refine(&refine), _prevRefine(0), _selected(false) { }
+    SparseSelector(Refinement& refine) : _refine(&refine), _selected(false) { }
     ~SparseSelector() { }
 
-    //
-    //  A previous refinement may be used to indicate whether components are fully defined or
-    //  not -- note since optional it is specified/returned by pointer rather than reference
-    //  (could make these both ptr for consistency...).
-    //
-    //  It is (increasingly) possible that this property ends up in the tags for the parent level,
-    //  in which case this refinement that generated the parent will not be necessary
-    //
-    void           setRefinement(Refinement& refine) { _refine = &refine; }
-    Refinement& getRefinement() const                { return *_refine; }
+    void        setRefinement(Refinement& refine) { _refine = &refine; }
+    Refinement& getRefinement() const             { return *_refine; }
 
-    void                 setPreviousRefinement(Refinement const* refine) { _prevRefine = refine; }
-    Refinement const* getPreviousRefinement() const                      { return _prevRefine; }
+    bool isSelectionEmpty() const { return !_selected; }
 
     //
     //  Methods for selecting (and marking) components for refinement.  All component indices
@@ -85,43 +73,29 @@ public:
     void selectEdge(  Index pEdge);
     void selectFace(  Index pFace);
 
-    //  Mark all incident faces of a vertex -- common in the original feature-adaptive scheme
-    //  to warrant inclusion, but may not be necessary if it is switch to being face-driven
-    void selectVertexFaces(Index pVertex);
+private:
+    SparseSelector() : _refine(0), _selected(false) { }
 
-    //
-    //  Useful queries during or after selection:
-    //
-    bool isSelectionEmpty() const { return !_selected; }
+    bool wasVertexSelected(Index pVertex) const { return _refine->getParentVertexSparseTag(pVertex)._selected; }
+    bool wasEdgeSelected(  Index pEdge) const   { return _refine->getParentEdgeSparseTag(pEdge)._selected; }
+    bool wasFaceSelected(  Index pFace) const   { return _refine->getParentFaceSparseTag(pFace)._selected; }
 
-    bool isVertexIncomplete(Index pVertex) const {
-        //  A parent of this refinement was child of the previous refinement:
-        return _prevRefine && _prevRefine->_childVertexTag[pVertex]._incomplete;
-    }
+    void markVertexSelected(Index pVertex) const { _refine->getParentVertexSparseTag(pVertex)._selected = true; }
+    void markEdgeSelected(  Index pEdge) const   { _refine->getParentEdgeSparseTag(pEdge)._selected = true; }
+    void markFaceSelected(  Index pFace) const   { _refine->getParentFaceSparseTag(pFace)._selected = true; }
+
+    void initializeSelection();
 
 private:
-    SparseSelector() { }
-
-    bool wasVertexSelected(Index pVertex) const { return _refine->_parentVertexTag[pVertex]._selected; }
-    bool wasEdgeSelected(  Index pEdge) const   { return _refine->_parentEdgeTag[pEdge]._selected; }
-    bool wasFaceSelected(  Index pFace) const   { return _refine->_parentFaceTag[pFace]._selected; }
-
-    void markVertexSelected(Index pVertex) const { _refine->_parentVertexTag[pVertex]._selected = true; }
-    void markEdgeSelected(  Index pEdge) const   { _refine->_parentEdgeTag[pEdge]._selected = true; }
-    void markFaceSelected(  Index pFace) const   { _refine->_parentFaceTag[pFace]._selected = true; }
-
-    void markSelection();
-
-private:
-    Refinement*       _refine;
-    Refinement const* _prevRefine;
-    bool _selected;
+    Refinement* _refine;
+    bool        _selected;
 };
 
+} // end namespace internal
 } // end namespace Vtr
 
 } // end namespace OPENSUBDIV_VERSION
 using namespace OPENSUBDIV_VERSION;
 } // end namespace OpenSubdiv
 
-#endif /* VTR_SPARSE_SELECTOR_H */
+#endif /* OPENSUBDIV3_VTR_SPARSE_SELECTOR_H */

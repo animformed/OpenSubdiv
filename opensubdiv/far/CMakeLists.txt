@@ -25,27 +25,52 @@
 #-------------------------------------------------------------------------------
 # source & headers
 set(SOURCE_FILES
-     patchTablesFactory.cpp
-     stencilTablesFactory.cpp
-     topologyRefiner.cpp
-     topologyRefinerFactory.cpp
+    bilinearPatchBuilder.cpp
+    catmarkPatchBuilder.cpp
+    error.cpp
+    loopPatchBuilder.cpp
+    patchBasis.cpp
+    patchBuilder.cpp
+    patchDescriptor.cpp
+    patchMap.cpp
+    patchTable.cpp
+    patchTableFactory.cpp
+    ptexIndices.cpp
+    stencilTable.cpp
+    stencilTableFactory.cpp
+    stencilBuilder.cpp
+    topologyDescriptor.cpp
+    topologyRefiner.cpp
+    topologyRefinerFactory.cpp
+)
+
+set(PRIVATE_HEADER_FILES
+    bilinearPatchBuilder.h
+    catmarkPatchBuilder.h
+    loopPatchBuilder.h
+    patchBasis.h
+    patchBuilder.h
+    sparseMatrix.h
+    stencilBuilder.h
 )
 
 set(PUBLIC_HEADER_FILES
-    kernelBatch.h
-    kernelBatchDispatcher.h
+    error.h
+    patchDescriptor.h
     patchParam.h
     patchMap.h
-    patchTables.h
-    patchTablesFactory.h
-    stencilTablesFactory.h
-    stencilTables.h
+    patchTable.h
+    patchTableFactory.h
+    primvarRefiner.h
+    ptexIndices.h
+    stencilTable.h
+    stencilTableFactory.h
+    topologyDescriptor.h
+    topologyLevel.h
     topologyRefiner.h
     topologyRefinerFactory.h
     types.h
 )
-
-set(PRIVATE_HEADER_FILES )
 
 set(DOXY_HEADER_FILES ${PUBLIC_HEADER_FILES})
 
@@ -60,10 +85,15 @@ if (NOT NO_LIB)
             ${PUBLIC_HEADER_FILES}
     )
 
+    set_target_properties(far_obj
+        PROPERTIES
+            FOLDER "opensubdiv"
+    )
+
 endif()
 
 #-------------------------------------------------------------------------------
-_add_doxy_headers( "${DOXY_HEADER_FILES}" )
+osd_add_doxy_headers( "${DOXY_HEADER_FILES}" )
 
 install(
     FILES

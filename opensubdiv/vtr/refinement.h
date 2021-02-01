@@ -21,12 +21,12 @@
 //   KIND, either express or implied. See the Apache License for the specific
 //   language governing permissions and limitations under the Apache License.
 //
-#ifndef VTR_REFINEMENT_H
-#define VTR_REFINEMENT_H
+#ifndef OPENSUBDIV3_VTR_REFINEMENT_H
+#define OPENSUBDIV3_VTR_REFINEMENT_H
 
 #include "../version.h"
 
-#include "../sdc/type.h"
+#include "../sdc/types.h"
 #include "../sdc/options.h"
 #include "../vtr/types.h"
 #include "../vtr/level.h"
@@ -39,14 +39,9 @@
 namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
 
-namespace Far {
-    class TopologyRefiner;
-    class PatchTablesFactory;
-}
-
 namespace Vtr {
+namespace internal {
 
-class SparseSelector;
 class FVarRefinement;
 
 //
@@ -56,9 +51,16 @@ class FVarRefinement;
 //  (adaptive or otherwise selective), so not all components in the parent level will spawn
 //  components in the child level.
 //
+//  Refinement is an abstract class and expects subclasses corresponding to the different types
+//  of topological splits that the supported subdivision schemes collectively require, i.e. those
+//  listed in Sdc::SplitType.  Note the virtual requirements expected of the subclasses in the list
+//  of protected methods -- they differ mainly in the topology that is created in the child Level
+//  and not the propagation of tags through refinement, subdivision of sharpness values or the
+//  treatment of face-varying data.  The primary subclasses are QuadRefinement and TriRefinement.
+//
 //  At a high level, all that is necessary in terms of interface is to construct, initialize
 //  (linking the two levels), optionally select components for sparse refinement (via use of the
-//  SparseSelector) and call the refine() method.  This is the usage expected in FarTopologyRefiner.
+//  SparseSelector) and call the refine() method.  This usage is expected of Far::TopologyRefiner.
 //
 //  Since we really want this class to be restricted from public access eventually, all methods
 //  begin with lower case (as is the convention for protected methods) and the list of friends
@@ -67,117 +69,122 @@ class FVarRefinement;
 class Refinement {
 
 public:
-    Refinement();
-    ~Refinement();
-
-    void setScheme(Sdc::Type const& schemeType, Sdc::Options const& schemeOptions);
-    void initialize(Level& parent, Level& child);
+    Refinement(Level const & parent, Level & child, Sdc::Options const& schemeOptions);
+    virtual ~Refinement();
 
     Level const& parent() const { return *_parent; }
-
     Level const& child() const  { return *_child; }
     Level&       child()        { return *_child; }
 
+    Sdc::Split getSplitType() const { return _splitType; }
+    int getRegularFaceSize() const { return _regFaceSize; }
+    Sdc::Options getOptions() const { return _options; }
+
+    //  Face-varying:
+    int getNumFVarChannels() const { return (int) _fvarChannels.size(); }
+
+    FVarRefinement const & getFVarRefinement(int c) const { return *_fvarChannels[c]; }
+
     //
-    //  Options associated with the actual refinement operation, which are going to get
-    //  quite involved to ensure that the refinement of data that is not of interest can
-    //  be suppressed.  For now we have:
+    //  Options associated with the actual refinement operation, which may end up
+    //  quite involved if we want to allow for the refinement of data that is not
+    //  of interest to be suppressed.  For now we have:
     //
     //      "sparse": the alternative to uniform refinement, which requires that
     //          components be previously selected/marked to be included.
     //
-    //      "face topology only": this is one that may get broken down into a finer
+    //      "minimal topology": this is one that may get broken down into a finer
     //          set of options.  It suppresses "full topology" in the child level
-    //          and only generates what is necessary to define the list of faces.
-    //          This is only one of the six possible topological relations that
-    //          can be generated -- we may eventually want a flag for each.
+    //          and only generates what is minimally necessary for interpolation --
+    //          which requires at least the face-vertices for faces, but also the
+    //          vertex-faces for any face-varying channels present.  So it will
+    //          generate one or two of the six possible topological relations.
     //
-    //      "compute masks": this is intended to be temporary, along with the data
-    //          members associated with it -- it will trigger the computation and
-    //          storage of mask weights for all child vertices.  This is naively
-    //          stored at this point and exists only for reference.
-    //
-    //  Its still up for debate as to how finely these should be controlled, e.g.
-    //  for sparse refinement, we likely want full topology at the finest level to
-    //  allow for subsequent patch construction...
+    //  These are strictly controlled right now, e.g. for sparse refinement, we
+    //  currently enforce full topology at the finest level to allow for subsequent
+    //  patch construction.
     //
     struct Options {
-        Options() : _sparse(0),
-                    _faceTopologyOnly(0)
+        Options() : _sparse(false),
+                    _faceVertsFirst(false),
+                    _minimalTopology(false)
                     { }
 
-        unsigned int _sparse           : 1;
-        unsigned int _faceTopologyOnly : 1;
+        unsigned int _sparse          : 1;
+        unsigned int _faceVertsFirst  : 1;
+        unsigned int _minimalTopology : 1;
 
-        //  Currently under consideration:
+        //  Still under consideration:
         //unsigned int _childToParentMap : 1;
-        //unsigned int _computeMasks     : 1;
     };
 
     void refine(Options options = Options());
+
+    bool hasFaceVerticesFirst() const { return _faceVertsFirst; }
 
 public:
     //
     //  Access to members -- some testing classes (involving vertex interpolation)
     //  currently make use of these:
     //
+    int getNumChildFacesFromFaces() const       { return _childFaceFromFaceCount; }
+    int getNumChildEdgesFromFaces() const       { return _childEdgeFromFaceCount; }
+    int getNumChildEdgesFromEdges() const       { return _childEdgeFromEdgeCount; }
     int getNumChildVerticesFromFaces() const    { return _childVertFromFaceCount; }
     int getNumChildVerticesFromEdges() const    { return _childVertFromEdgeCount; }
     int getNumChildVerticesFromVertices() const { return _childVertFromVertCount; }
+
+    Index getFirstChildFaceFromFaces() const      { return _firstChildFaceFromFace; }
+    Index getFirstChildEdgeFromFaces() const      { return _firstChildEdgeFromFace; }
+    Index getFirstChildEdgeFromEdges() const      { return _firstChildEdgeFromEdge; }
+    Index getFirstChildVertexFromFaces() const    { return _firstChildVertFromFace; }
+    Index getFirstChildVertexFromEdges() const    { return _firstChildVertFromEdge; }
+    Index getFirstChildVertexFromVertices() const { return _firstChildVertFromVert; }
 
     Index getFaceChildVertex(Index f) const   { return _faceChildVertIndex[f]; }
     Index getEdgeChildVertex(Index e) const   { return _edgeChildVertIndex[e]; }
     Index getVertexChildVertex(Index v) const { return _vertChildVertIndex[v]; }
 
-    IndexArray const getFaceChildFaces(Index parentFace) const;
-    IndexArray const getFaceChildEdges(Index parentFace) const;
-    IndexArray const getEdgeChildEdges(Index parentEdge) const;
+    ConstIndexArray  getFaceChildFaces(Index parentFace) const;
+    ConstIndexArray  getFaceChildEdges(Index parentFace) const;
+    ConstIndexArray  getEdgeChildEdges(Index parentEdge) const;
 
-    //  Child-to-parent relationships (not yet complete -- unclear how we will define the
-    //  "type" of the parent component, e.g. vertex, edge or face):
+    //  Child-to-parent relationships
+    bool isChildVertexComplete(Index v) const       { return ! _childVertexTag[v]._incomplete; }
+
     Index getChildFaceParentFace(Index f) const     { return _childFaceParentIndex[f]; }
-    int      getChildFaceInParentFace(Index f) const   { return _childFaceTag[f]._indexInParent; }
+    int   getChildFaceInParentFace(Index f) const   { return _childFaceTag[f]._indexInParent; }
 
     Index getChildEdgeParentIndex(Index e) const    { return _childEdgeParentIndex[e]; }
 
     Index getChildVertexParentIndex(Index v) const  { return _childVertexParentIndex[v]; }
 
 //
-//  Non-public methods:
+//  Modifiers intended for internal/protected use:
 //
-protected:
-
-    friend class FVarRefinement;
-    friend class SparseSelector;
-
-    friend class Far::TopologyRefiner;
-    friend class Far::PatchTablesFactory;
-
+public:
 
     IndexArray getFaceChildFaces(Index parentFace);
     IndexArray getFaceChildEdges(Index parentFace);
     IndexArray getEdgeChildEdges(Index parentEdge);
 
-protected:
-    //
-    //  Work in progress...
+public:
     //
     //  Tags have now been added per-component in Level, but there is additional need to tag
     //  components within Refinement -- we can't tag the parent level components for any
     //  refinement (in order to keep it const) and tags associated with children that are
     //  specific to the child-to-parent mapping may not be warranted in the child level.
     //
-    //  Parent tags are only required for sparse refinement, and so a single SparseTag is used
-    //  for all three component types.  The main property to tag is whether a component was
-    //  selected.  Tagging if a component is "transitional" is also useful.  This may only be
-    //  necessary for edges but is currently packed into a mask per-edge for faces -- that may
-    //  be deferred, in which case "transitional" can be a single bit.
+    //  Parent tags are only required for sparse refinement.  The main property to tag is
+    //  whether a component was selected, and so a single SparseTag is used for all three
+    //  component types.  Tagging if a component is "transitional" is also useful.  This may
+    //  only be necessary for edges but is currently packed into a mask per-edge for faces,
+    //  which could be deferred, in which case "transitional" could be a single bit.
     //
-    //  Child tags are to become part of the new child-to-parent mapping, which is to consist
-    //  of the parent component index for each child component, plus a set of tags for the child
-    //  indicating more about its relationship to its parent, e.g. is it completely defined,
-    //  what the parent component type is, what is the index of the chile within its parent,
-    //  etc.
+    //  Child tags are part of the child-to-parent mapping, which consists of the parent
+    //  component index for each child component, plus a tag for the child indicating more
+    //  about its relationship to its parent, e.g. is it completely defined, what the parent
+    //  component type is, what is the index of the child within its parent, etc.
     //
     struct SparseTag {
         SparseTag() : _selected(0), _transitional(0) { }
@@ -194,40 +201,114 @@ protected:
         unsigned char _indexInParent : 2;  // index of child wrt parent:  0-3, or iterative if N > 4
     };
 
-//
-//  Remaining methods really should remain private...
-//
-private:
+    //  Methods to access and modify tags:
+    SparseTag const & getParentFaceSparseTag(  Index f) const { return _parentFaceTag[f]; }
+    SparseTag const & getParentEdgeSparseTag(  Index e) const { return _parentEdgeTag[e]; }
+    SparseTag const & getParentVertexSparseTag(Index v) const { return _parentVertexTag[v]; }
+
+    SparseTag & getParentFaceSparseTag(  Index f) { return _parentFaceTag[f]; }
+    SparseTag & getParentEdgeSparseTag(  Index e) { return _parentEdgeTag[e]; }
+    SparseTag & getParentVertexSparseTag(Index v) { return _parentVertexTag[v]; }
+
+    ChildTag const & getChildFaceTag(  Index f) const { return _childFaceTag[f]; }
+    ChildTag const & getChildEdgeTag(  Index e) const { return _childEdgeTag[e]; }
+    ChildTag const & getChildVertexTag(Index v) const { return _childVertexTag[v]; }
+
+    ChildTag & getChildFaceTag(  Index f) { return _childFaceTag[f]; }
+    ChildTag & getChildEdgeTag(  Index e) { return _childEdgeTag[e]; }
+    ChildTag & getChildVertexTag(Index v) { return _childVertexTag[v]; }
+
+//  Remaining methods should really be protected -- for use by subclasses...
+public:
     //
     //  Methods involved in constructing the parent-to-child mapping -- when the
     //  refinement is sparse, additional methods are needed to identify the selection:
     //
-    void initializeSparseSelectionTags();
-    void markSparseChildComponents();
-
-    void allocateParentToChildMapping();
     void populateParentToChildMapping();
+    void populateParentChildIndices();
     void printParentToChildMapping() const;
+
+    virtual void allocateParentChildIndices() = 0;
+
+    //  Supporting method for sparse refinement:
+    void initializeSparseSelectionTags();
+    void markSparseChildComponentIndices();
+    void markSparseVertexChildren();
+    void markSparseEdgeChildren();
+
+    virtual void markSparseFaceChildren() = 0;
+
+    void initializeChildComponentCounts();
 
     //
     //  Methods involved in constructing the child-to-parent mapping:
     //
-    void createChildComponents();
-    void populateChildToParentTags();
-    void populateChildToParentIndices();
     void populateChildToParentMapping();
 
+    void populateFaceParentVectors(ChildTag const initialChildTags[2][4]);
+    void populateFaceParentFromParentFaces(ChildTag const initialChildTags[2][4]);
+
+    void populateEdgeParentVectors(ChildTag const initialChildTags[2][4]);
+    void populateEdgeParentFromParentFaces(ChildTag const initialChildTags[2][4]);
+    void populateEdgeParentFromParentEdges(ChildTag const initialChildTags[2][4]);
+
+    void populateVertexParentVectors(ChildTag const initialChildTags[2][4]);
+    void populateVertexParentFromParentFaces(ChildTag const initialChildTags[2][4]);
+    void populateVertexParentFromParentEdges(ChildTag const initialChildTags[2][4]);
+    void populateVertexParentFromParentVertices(ChildTag const initialChildTags[2][4]);
+
     //
-    //  Methods involved in subdividing/propagating component tags and sharpness:
+    //  Methods involved in propagating component tags from parent to child:
     //
     void propagateComponentTags();
 
-    void propagateFaceTagsFromParentFaces();
-    void propagateEdgeTagsFromParentFaces();
-    void propagateEdgeTagsFromParentEdges();
-    void propagateVertexTagsFromParentFaces();
-    void propagateVertexTagsFromParentEdges();
-    void propagateVertexTagsFromParentVertices();
+    void populateFaceTagVectors();
+    void populateFaceTagsFromParentFaces();
+
+    void populateEdgeTagVectors();
+    void populateEdgeTagsFromParentFaces();
+    void populateEdgeTagsFromParentEdges();
+
+    void populateVertexTagVectors();
+    void populateVertexTagsFromParentFaces();
+    void populateVertexTagsFromParentEdges();
+    void populateVertexTagsFromParentVertices();
+
+    //
+    //  Methods (and types) involved in subdividing the topology -- though not
+    //  fully exploited, any subset of the 6 relations can be generated:
+    //
+    struct Relations {
+        unsigned int   _faceVertices : 1;
+        unsigned int   _faceEdges    : 1;
+        unsigned int   _edgeVertices : 1;
+        unsigned int   _edgeFaces    : 1;
+        unsigned int   _vertexFaces  : 1;
+        unsigned int   _vertexEdges  : 1;
+
+        void setAll(bool enable) {
+            _faceVertices = enable;
+            _faceEdges    = enable;
+            _edgeVertices = enable;
+            _edgeFaces    = enable;
+            _vertexFaces  = enable;
+            _vertexEdges  = enable;
+        }
+    };
+
+    void subdivideTopology(Relations const& relationsToSubdivide);
+
+    virtual void populateFaceVertexRelation() = 0;
+    virtual void populateFaceEdgeRelation() = 0;
+    virtual void populateEdgeVertexRelation() = 0;
+    virtual void populateEdgeFaceRelation() = 0;
+    virtual void populateVertexFaceRelation() = 0;
+    virtual void populateVertexEdgeRelation() = 0;
+
+    //
+    //  Methods involved in subdividing and inspecting sharpness values:
+    //
+    void subdivideSharpnessValues();
 
     void subdivideVertexSharpness();
     void subdivideEdgeSharpness();
@@ -238,80 +319,30 @@ private:
     //
     void subdivideFVarChannels();
 
+protected:
+    // A debug method of Level prints a Refinement (should really change this)
+    friend void Level::print(const Refinement *) const;
+
     //
-    //  Methods (and types) involved in subdividing the topology:
+    //  Data members -- the logical grouping of some of these (and methods that make use
+    //  of them) may lead to grouping them into a few utility classes or structs...
     //
-    //  Simple struct defining the types of topological relations to subdivide:
-    struct Relations {
-        unsigned int   _faceVertices : 1;
-        unsigned int   _faceEdges    : 1;
-        unsigned int   _edgeVertices : 1;
-        unsigned int   _edgeFaces    : 1;
-        unsigned int   _vertexFaces  : 1;
-        unsigned int   _vertexEdges  : 1;
 
-        void setAll(bool value) {
-            _faceVertices = value;
-            _faceEdges    = value;
-            _edgeVertices = value;
-            _edgeFaces    = value;
-            _vertexFaces  = value;
-            _vertexEdges  = value;
-        }
-    };
+    //  Defined on construction:
+    Level const * _parent;
+    Level *       _child;
+    Sdc::Options  _options;
 
-    void subdivideTopology(Relations const& relationsToSubdivide);
+    //  Defined by the subclass:
+    Sdc::Split _splitType;
+    int        _regFaceSize;
 
-    //  Methods for sizing the child topology vectors (note we only need four of the
-    //  expected six here as face-edge shares face-vert and edge-vert is trivial):
-    void initializeFaceVertexCountsAndOffsets();
-    void initializeEdgeFaceCountsAndOffsets();
-    void initializeVertexFaceCountsAndOffsets();
-    void initializeVertexEdgeCountsAndOffsets();
-
-    //  Methods for populating sections of child topology relations based on their origin
-    //  in the parent -- 12 in all
-    //
-    //  These iterate through all components -- currently iterating through the parents
-    //  and updating only those children marked valid.  We may want to change the iteration
-    //  strategy here, particularly for sparse refinement.  Plans are to factor these out
-    //  to work between a specific parent and child pair and control the iteration through
-    //  other means.
-    //
-    void populateFaceVerticesFromParentFaces();
-    void populateFaceEdgesFromParentFaces();
-    void populateEdgeVerticesFromParentFaces();
-    void populateEdgeVerticesFromParentEdges();
-    void populateEdgeFacesFromParentFaces();
-    void populateEdgeFacesFromParentEdges();
-    void populateVertexFacesFromParentFaces();
-    void populateVertexFacesFromParentEdges();
-    void populateVertexFacesFromParentVertices();
-    void populateVertexEdgesFromParentFaces();
-    void populateVertexEdgesFromParentEdges();
-    void populateVertexEdgesFromParentVertices();
-
-private:
-    friend class Level;  //  Access for some debugging information
-
-    Level* _parent;
-    Level* _child;
-
-    Sdc::Type    _schemeType;
-    Sdc::Options _schemeOptions;
-
-    bool _quadSplit;  // generalize this to Sdc::Split later
+    //  Determined by the refinement options:
     bool _uniform;
+    bool _faceVertsFirst;
 
     //
-    //  Inventory of the types of child components:
-    //      There are six types of child components:  child faces can only originate from
-    //  faces, child edges can originate from faces and edges, while child vertices can
-    //  originate from all three component types.
-    //
-    //  While the Refinement populates the Level containing the children, knowing the
-    //  counts for the originating type, and generating them in blocks according to these
-    //  types, allows us to process them more specifically.
+    //  Inventory and ordering of the types of child components:
     //
     int _childFaceFromFaceCount;  // arguably redundant (all faces originate from faces)
     int _childEdgeFromFaceCount;
@@ -320,21 +351,29 @@ private:
     int _childVertFromEdgeCount;
     int _childVertFromVertCount;
 
+    int _firstChildFaceFromFace;  // arguably redundant (all faces originate from faces)
+    int _firstChildEdgeFromFace;
+    int _firstChildEdgeFromEdge;
+    int _firstChildVertFromFace;
+    int _firstChildVertFromEdge;
+    int _firstChildVertFromVert;
+
     //
-    //  Members involved in the parent-to-child mapping:
+    //  The parent-to-child mapping:
     //      These are vectors sized according to the number of parent components (and
     //  their topology) that contain references/indices to the child components that
     //  result from them by refinement.  When refinement is sparse, parent components
     //  that have not spawned all child components will have their missing children
     //  marked as invalid.
     //
-    //  Vectors for each of the six child component types are sized according to a
-    //  topological relation of the originating parent type, i.e. for child faces and
-    //  edges originating from parent faces, there will be a 1-to-1 correspondence
-    //  between a parents face-verts and its child faces (not true for Loop) and
-    //  similarly its child edges.  Given this correspondence with the topology vectors,
-    //  we use the same counts/offsets of the topology vectors when we can.
+    //  NOTE the "Array" members here.  Often vectors within the Level can be shared
+    //  with the Refinement, and an Array instance is used to do so.  If not shared
+    //  the subclass just initializes the Array members after allocating its own local
+    //  vector members.
     //
+    IndexArray _faceChildFaceCountsAndOffsets;
+    IndexArray _faceChildEdgeCountsAndOffsets;
+
     IndexVector _faceChildFaceIndices;  // *cannot* always use face-vert counts/offsets
     IndexVector _faceChildEdgeIndices;  // can use face-vert counts/offsets
     IndexVector _faceChildVertIndex;
@@ -345,24 +384,7 @@ private:
     IndexVector _vertChildVertIndex;
 
     //
-    //  Members involved in the child-to-parent mapping:
-    //      In many cases just having the parent-to-child mapping is adequate to refine
-    //  everything we need, but some analysis of the resulting refinement wants to "walk
-    //  up the hierarchy" for a component to gather information about its ancestry (e.g.
-    //  PTex coordinates).  It is also useful when the refinement is sparse -- the more
-    //  sparse, the more it makes sense to iterate through the child components and seek
-    //  their parents rather than the reverse.
-    //
-    //  So the reverse child-to-parent mapping definitely useful, but it is relatively
-    //  costly (both space and time) to initialize and propagate though the hierarchy, so
-    //  I would prefer to only enable it when needed, i.e. make it optional.
-    //
-    //  The mapping itself is simply an integer index for each child component, along with
-    //  a corresponding tag for each with information about its parent:  is the child
-    //  fully defined wrt its parent (when refinement is sparse), what is the index of the
-    //  child within its parent, and what is the type of the parent.  (The latter can be
-    //  inferred from the index of the child and so may be redudant.)
-    //
+    //  The child-to-parent mapping:
     //
     IndexVector _childFaceParentIndex;
     IndexVector _childEdgeParentIndex;
@@ -373,85 +395,49 @@ private:
     std::vector<ChildTag> _childVertexTag;
 
     //
-    //  Additional tags per parent component are also used when refinement is sparse.
+    //  Tags for sparse selection of components:
     //
     std::vector<SparseTag> _parentFaceTag;
     std::vector<SparseTag> _parentEdgeTag;
     std::vector<SparseTag> _parentVertexTag;
 
-    //  References to components in the base level (top-most ancestor) may be useful
-    //  to copy non-interpolatible properties to all descendant components.
-
-    //  Refinement data for face-varying channels:
+    //
+    //  Refinement data for face-varying channels present in the Levels being refined:
+    //
     std::vector<FVarRefinement*> _fvarChannels;
-
-public:
-    //  TEMPORARY -- FOR ILLUSTRATIVE PURPOSES ONLY...
-    //
-    //  Mask for the child vertices stored relative to parent topology, i.e. weights
-    //  for a child face-vertex are stored relative to the parent face -- a weight for
-    //  each of the parent face's vertices.
-    //
-    //  Currently the full complement of weights is used and expected to be applied, e.g.
-    //  for a crease in the interior, there may be no face-vert weights in the stencil
-    //  and so no need to apply them, but we require all and so set these to zero for now.
-    //  We will need some kind of stencil type associated with each child vertex if we
-    //  are to avoid doing so in order to detect the difference.
-    //
-    //  Note this is potentially extremely wasteful in terms of memory when the set of
-    //  refined components in the child is small relative to the parent.  All possible
-    //  stencil weights (i.e. for uniform refinement) will be allocated here if the
-    //  corresonding counts/offset of the parent are to be used.
-    //
-//#define _VTR_COMPUTE_MASK_WEIGHTS_ENABLED
-#ifdef _VTR_COMPUTE_MASK_WEIGHTS_ENABLED
-    void computeMaskWeights();
-
-    std::vector<float> _faceVertWeights;  // matches parent face vert counts and offsets
-    std::vector<float> _edgeVertWeights;  // trivially 2 per parent edge
-    std::vector<float> _edgeFaceWeights;  // matches parent edge face counts and offsets
-    std::vector<float> _vertVertWeights;  // trivially 1 per parent vert
-    std::vector<float> _vertEdgeWeights;  // matches parent vert edge counts and offsets
-    std::vector<float> _vertFaceWeights;  // matches parent vert face counts and offsets
-#endif
 };
 
-inline IndexArray const
+inline ConstIndexArray
 Refinement::getFaceChildFaces(Index parentFace) const {
 
-    //
-    //  Note this will need to vary based on the topological split applied...
-    //
-    return IndexArray(&_faceChildFaceIndices[_parent->getOffsetOfFaceVertices(parentFace)],
-                                                _parent->getNumFaceVertices(parentFace));
+    return ConstIndexArray(&_faceChildFaceIndices[_faceChildFaceCountsAndOffsets[2*parentFace+1]],
+                                             _faceChildFaceCountsAndOffsets[2*parentFace]);
 }
+
 inline IndexArray
 Refinement::getFaceChildFaces(Index parentFace) {
 
-    return IndexArray(&_faceChildFaceIndices[_parent->getOffsetOfFaceVertices(parentFace)],
-                                                _parent->getNumFaceVertices(parentFace));
+    return IndexArray(&_faceChildFaceIndices[_faceChildFaceCountsAndOffsets[2*parentFace+1]],
+                                             _faceChildFaceCountsAndOffsets[2*parentFace]);
 }
 
-inline IndexArray const
+inline ConstIndexArray
 Refinement::getFaceChildEdges(Index parentFace) const {
 
-    //
-    //  Note this *may* need to vary based on the topological split applied...
-    //
-    return IndexArray(&_faceChildEdgeIndices[_parent->getOffsetOfFaceVertices(parentFace)],
-                                                _parent->getNumFaceVertices(parentFace));
+    return ConstIndexArray(&_faceChildEdgeIndices[_faceChildEdgeCountsAndOffsets[2*parentFace+1]],
+                                             _faceChildEdgeCountsAndOffsets[2*parentFace]);
 }
 inline IndexArray
 Refinement::getFaceChildEdges(Index parentFace) {
 
-    return IndexArray(&_faceChildEdgeIndices[_parent->getOffsetOfFaceVertices(parentFace)],
-                                                _parent->getNumFaceVertices(parentFace));
+    return IndexArray(&_faceChildEdgeIndices[_faceChildEdgeCountsAndOffsets[2*parentFace+1]],
+                                             _faceChildEdgeCountsAndOffsets[2*parentFace]);
 }
 
-inline IndexArray const
+inline ConstIndexArray
 Refinement::getEdgeChildEdges(Index parentEdge) const {
 
-    return IndexArray(&_edgeChildEdgeIndices[parentEdge*2], 2);
+    return ConstIndexArray(&_edgeChildEdgeIndices[parentEdge*2], 2);
 }
 
 inline IndexArray
@@ -460,10 +446,11 @@ Refinement::getEdgeChildEdges(Index parentEdge) {
     return IndexArray(&_edgeChildEdgeIndices[parentEdge*2], 2);
 }
 
+} // end namespace internal
 } // end namespace Vtr
 
 } // end namespace OPENSUBDIV_VERSION
 using namespace OPENSUBDIV_VERSION;
 } // end namespace OpenSubdiv
 
-#endif /* VTR_REFINEMENT_H */
+#endif /* OPENSUBDIV3_VTR_REFINEMENT_H */

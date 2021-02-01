@@ -25,13 +25,13 @@
 Introduction
 ------------
 
+.. image:: http://graphics.pixar.com/opensubdiv/docs/images/opensubdiv_splash_v3_4_0.png
+   :width: 100%
+   :align: center
+
 .. contents::
    :local:
    :backlinks: none
-
-.. image:: images/geri.jpg 
-   :width: 600px
-   :align: center
 
 ----
 
@@ -40,13 +40,12 @@ Introduction
 
 OpenSubdiv is a set of open source libraries that implement high performance 
 subdivision surface (subdiv) evaluation on massively parallel CPU and GPU 
-architectures. This codepath is optimized for drawing deforming surfaces with 
-static topology at interactive framerates. The resulting limit surfaces are a match
-for Pixar's Renderman specification within numerical precision limits.
+architectures. This code path is optimized for drawing deforming surfaces with 
+static topology at interactive framerates. 
 
-OpenSubdiv is a code API which we hope to integrate into 3rd. party digital
-content creation tools. It is **not** an application, nor a tool that can be used
-directly to create digital assets.
+OpenSubdiv is an API ready to be integrated into 3rd party digital
+content creation tools. It is **not** an application, nor a tool that can be 
+used directly to create digital assets.
 
 ----
 
@@ -86,17 +85,17 @@ between Pixar and Microsoft.
     | *Feature Adaptive GPU Rendering of Catmull-Clark Subdivision Surfaces*
     | Matthias Niessner, Charles Loop, Mark Meyer, and Tony DeRose
     | ACM Transactions on Graphics, Vol. 31 No. 1 Article 6 January 2012 
-    | `<http://research.microsoft.com/en-us/um/people/cloop/tog2012.pdf>`_
+    | `<http://graphics.pixar.com/library/GPUSubdivRenderingA/paper.pdf>`_
     |
     | *Efficient Evaluation of Semi-Smooth Creases in Catmull-Clark Subdivision Surfaces*
     | Matthias Niessner, Charles Loop, and Guenter Greiner.
     | Eurographics Proceedings, Cagliari, 2012
-    | `<http://research.microsoft.com/en-us/um/people/cloop/EG2012.pdf>`_
+    | `<https://niessnerlab.org/papers/2012/1semismooth/niessner2012efficient.pdf>`_
     |
     | *Analytic Displacement Mapping using Hardware Tessellation*
     | Matthias Niessner, Charles Loop
-    | ACM Transactions on Graphics, To appear 2013
-    | `<http://research.microsoft.com/en-us/um/people/cloop/TOG2013.pdf>`_
+    | ACM Transactions on Graphics, Vol. 32 No. 3 Article 26 June 2013
+    | `<https://niessnerlab.org/papers/2013/3analytic/niessner2013analytic.pdf>`_
     
 ----
 
@@ -105,7 +104,7 @@ Heritage
 
 This is the fifth-generation subdiv library in use by Pixar's proprietary animation 
 system in a lineage that started with code written by Tony DeRose and Tien Truong 
-for Geri\u2019s Game in 1996. Each generation has been a from-scratch rewrite that 
+for Geri's Game in 1996. Each generation has been a from-scratch rewrite that 
 has built upon our experience using subdivision surfaces to make animated films. 
 This code is live, so Pixar's changes to OpenSubdiv for current and future films 
 will be released as open source at the same time they are rolled out to Pixar 
@@ -144,35 +143,21 @@ any contributors' trademarks. In other words, you can use OpenSubdiv to make a
 product, but you cannot use a Luxo Lamp (or other character, etc.) when marketing 
 your product.
 
+`License Header <license.html>`_
 
 ----
 
 Contributing
 ============
 
-In order for us to accept code submissions (merge git pull-requests), contributors 
-need to sign the Contributor License Agreement (CLA). There are two CLAs, one for 
-individuals and one for corporations. As for the end-user license, both are based 
-on Apache. They are found in the code repository (`individual form 
-<https://github.com/PixarAnimationStudios/OpenSubdiv/blob/master/OpenSubdivCLA_individual.pdf>`__,
-`corporate form <https://github.com/PixarAnimationStudios/OpenSubdiv/blob/master/OpenSubdivCLA_corporate.pdf>`__). 
-Please email the signed CLA to opensubdiv-cla@pixar.com.
-
-
-For more details about OpenSubdiv, see `Pixar Graphics Technologies <http:  graphics.pixar.com>`__.
+For details on how to contribute to OpenSubdiv, see the page on 
+`Contributing <contributing.html>`_
 
 ----
 
 External Resources
 ==================
 
-Microsoft Research:
-    `Charles Loop <http://research.microsoft.com/en-us/um/people/cloop/>`__
-    `Matthias Niessner <http://lgdv.cs.fau.de/people/card/matthias/niessner/>`__
-
 Pixar Research:
     `Pixar R&D Portal <http://graphics.pixar.com/research/>`__
-
-
-
 

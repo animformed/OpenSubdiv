@@ -21,12 +21,16 @@
 //   KIND, either express or implied. See the Apache License for the specific
 //   language governing permissions and limitations under the Apache License.
 //
-#include "../sdc/type.h"
-#include "../sdc/options.h"
-#include "../sdc/crease.h"
-#include "../vtr/level.h"
-#include "../far/topologyRefiner.h"
 #include "../far/topologyRefinerFactory.h"
+#include "../far/topologyRefiner.h"
+#include "../sdc/types.h"
+#include "../vtr/level.h"
+
+#include <cstdio>
+#ifdef _MSC_VER
+    #define snprintf _snprintf
+#endif
+
 
 namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
@@ -34,41 +38,88 @@ namespace OPENSUBDIV_VERSION {
 namespace Far {
 
 //
-//  Methods for the Factory base class -- general enough to warrant including in
-//  the base class rather than the subclass template (and so replicated for each
-//  usage)
+//  Methods for the Factory base class -- general enough to warrant including
+//  in the base class rather than the subclass template (and so replicated for
+//  each usage)
 //
 //
-void
-TopologyRefinerFactoryBase::validateComponentTopologySizing(TopologyRefiner& refiner) {
+bool
+TopologyRefinerFactoryBase::prepareComponentTopologySizing(
+    TopologyRefiner& refiner) {
 
-    Vtr::Level& baseLevel = refiner.getBaseLevel();
+    Vtr::internal::Level& baseLevel = refiner.getLevel(0);
 
+    //
+    //  At minimum we require face-vertices (the total count of which can be
+    //  determined from the offsets accumulated during sizing pass) and we
+    //  need to resize members related to them to be populated during
+    //  assignment:
+    //
     int vCount = baseLevel.getNumVertices();
-    int eCount = baseLevel.getNumEdges();
     int fCount = baseLevel.getNumFaces();
 
-    assert((vCount > 0) && (fCount > 0));
+    if (vCount == 0) {
+        Error(FAR_RUNTIME_ERROR,
+            "Failure in TopologyRefinerFactory<>::Create() -- "
+            "mesh contains no vertices.");
+        return false;
+    }
+    if (fCount == 0) {
+        Error(FAR_RUNTIME_ERROR,
+            "Failure in TopologyRefinerFactory<>::Create() -- "
+            "meshes without faces not yet supported.");
+        return false;
+    }
 
-    //
-    //  This still needs a little work -- currently we are assuming all counts and offsets
-    //  have been assigned, but eventually only the counts will be assigined (in arbitrary
-    //  order) and we will need to accumulate the offsets to get the total sizes.  That
-    //  will require new methods on Vtr::Level -- we do not want direct member access here.
-    //
-    int fVertCount = 0;
-    for (int i = 0; i < fCount; ++i) {
-        fVertCount += baseLevel.getNumFaceVertices(i);
+    //  Make sure no face was defined that would lead to a valence overflow --
+    //  the max valence has been initialized with the maximum number of
+    //  face-vertices:
+    if (baseLevel.getMaxValence() > Vtr::VALENCE_LIMIT) {
+        char msg[1024];
+        snprintf(msg, 1024,
+            "Failure in TopologyRefinerFactory<>::Create() -- "
+            "face with %d vertices > %d max.",
+            baseLevel.getMaxValence(), Vtr::VALENCE_LIMIT);
+        Error(FAR_RUNTIME_ERROR, msg);
+        return false;
+    }
+
+    int fVertCount = baseLevel.getNumFaceVertices(fCount - 1) +
+                     baseLevel.getOffsetOfFaceVertices(fCount - 1);
+
+    if (fVertCount == 0) {
+        Error(FAR_RUNTIME_ERROR,
+            "Failure in TopologyRefinerFactory<>::Create() -- "
+            "mesh contains no face-vertices.");
+        return false;
+    }
+    if ((refiner.GetSchemeType() == Sdc::SCHEME_LOOP) &&
+        (fVertCount != (3 * fCount))) {
+        Error(FAR_RUNTIME_ERROR,
+            "Failure in TopologyRefinerFactory<>::Create() -- "
+            "non-triangular faces not supported by Loop scheme.");
+        return false;
     }
     baseLevel.resizeFaceVertices(fVertCount);
-    assert(baseLevel.getNumFaceVerticesTotal() > 0);
+
+    //
+    //  If edges were sized, all other topological relations must be sized
+    //  with it, in which case we allocate those members to be populated.
+    //  Otherwise, sizing of the other topology members is deferred until
+    //  the face-vertices are assigned and the resulting relationships
+    //  determined:
+    //
+    int eCount = baseLevel.getNumEdges();
 
     if (eCount > 0) {
         baseLevel.resizeFaceEdges(baseLevel.getNumFaceVerticesTotal());
         baseLevel.resizeEdgeVertices();
-        baseLevel.resizeEdgeFaces(  baseLevel.getNumEdgeFaces(eCount-1)   + baseLevel.getOffsetOfEdgeFaces(eCount-1));
-        baseLevel.resizeVertexFaces(baseLevel.getNumVertexFaces(vCount-1) + baseLevel.getOffsetOfVertexFaces(vCount-1));
-        baseLevel.resizeVertexEdges(baseLevel.getNumVertexEdges(vCount-1) + baseLevel.getOffsetOfVertexEdges(vCount-1));
+        baseLevel.resizeEdgeFaces(  baseLevel.getNumEdgeFaces(eCount-1)   +
+                                    baseLevel.getOffsetOfEdgeFaces(eCount-1));
+        baseLevel.resizeVertexFaces(baseLevel.getNumVertexFaces(vCount-1) +
+                                    baseLevel.getOffsetOfVertexFaces(vCount-1));
+        baseLevel.resizeVertexEdges(baseLevel.getNumVertexEdges(vCount-1) +
+                                    baseLevel.getOffsetOfVertexEdges(vCount-1));
 
         assert(baseLevel.getNumFaceEdgesTotal() > 0);
         assert(baseLevel.getNumEdgeVerticesTotal() > 0);
@@ -76,74 +127,133 @@ TopologyRefinerFactoryBase::validateComponentTopologySizing(TopologyRefiner& ref
         assert(baseLevel.getNumVertexFacesTotal() > 0);
         assert(baseLevel.getNumVertexEdgesTotal() > 0);
     }
+    return true;
 }
 
-void
-TopologyRefinerFactoryBase::validateVertexComponentTopologyAssignment(TopologyRefiner& refiner) {
+bool
+TopologyRefinerFactoryBase::prepareComponentTopologyAssignment(
+    TopologyRefiner& refiner, bool fullValidation,
+    TopologyCallback callback, void const * callbackData) {
 
-    Vtr::Level& baseLevel = refiner.getBaseLevel();
+    Vtr::internal::Level& baseLevel = refiner.getLevel(0);
 
-    //
-    //  In future we may want the ability to complete aspects of the topology that are incovenient
-    //  for clients to specify, e.g. the local indices associated with some relations, orienting
-    //  the vertex relations, etc.  For the near term we'll be assuming only face-vertices have
-    //  been specified and the absence of edges will trigger the construction of everything else:
-    //
     bool completeMissingTopology = (baseLevel.getNumEdges() == 0);
     if (completeMissingTopology) {
-        //  Need to invoke some Vtr::Level method to "fill in" the missing topology...
-        baseLevel.completeTopologyFromFaceVertices();
-    }
-
-    bool applyValidation = false;
-    if (applyValidation) {
-        if (!baseLevel.validateTopology()) {
-            printf("Invalid topology detected in TopologyRefinerFactory (%s)\n",
-                completeMissingTopology ? "partially specified and completed" : "fully specified");
-            //baseLevel.print();
-            assert(false);
+        if (! baseLevel.completeTopologyFromFaceVertices()) {
+            char msg[1024];
+            snprintf(msg, 1024,
+                "Failure in TopologyRefinerFactory<>::Create() -- "
+                "vertex with valence %d > %d max.",
+                baseLevel.getMaxValence(), Vtr::VALENCE_LIMIT);
+            Error(FAR_RUNTIME_ERROR, msg);
+            return false;
+        }
+    } else {
+        if (baseLevel.getMaxValence() == 0) {
+            Error(FAR_RUNTIME_ERROR,
+                "Failure in TopologyRefinerFactory<>::Create() -- "
+                "maximum valence not assigned.");
+            return false;
         }
     }
-}
 
-void
-TopologyRefinerFactoryBase::validateFaceVaryingComponentTopologyAssignment(TopologyRefiner& refiner) {
-
-    for (int channel=0; channel<refiner.GetNumFVarChannels(); ++channel) {
-        refiner.completeFVarChannelTopology(channel);
+    if (fullValidation) {
+        if (! baseLevel.validateTopology(callback, callbackData)) {
+            if (completeMissingTopology) {
+                Error(FAR_RUNTIME_ERROR,
+                    "Failure in TopologyRefinerFactory<>::Create() -- "
+                    "invalid topology detected from partial specification.");
+            } else {
+                Error(FAR_RUNTIME_ERROR,
+                    "Failure in TopologyRefinerFactory<>::Create() -- "
+                    "invalid topology detected as fully specified.");
+            }
+            return false;
+        }
     }
+
+    //  Now that we have a valid base level, initialize the Refiner's
+    //  component inventory:
+    refiner.initializeInventory();
+    return true;
 }
 
-//
-//  This method combines the initialization of component tags with the sharpening of edges and
-//  vertices according to the given boundary interpolation rule in the Options.  Since both
-//  involve traversing the edge and vertex lists and noting the presence of boundaries -- best
-//  to do both at once...
-//
-void
-TopologyRefinerFactoryBase::applyComponentTagsAndBoundarySharpness(TopologyRefiner& refiner) {
+bool
+TopologyRefinerFactoryBase::prepareComponentTagsAndSharpness(
+    TopologyRefiner& refiner) {
 
-    Vtr::Level&  baseLevel = refiner.getBaseLevel();
-
-    assert((int)baseLevel._edgeTags.size() == baseLevel.getNumEdges());
-    assert((int)baseLevel._vertTags.size() == baseLevel.getNumVertices());
-    assert((int)baseLevel._faceTags.size() == baseLevel.getNumFaces());
+    //
+    //  This method combines the initialization of internal component tags
+    //  with the sharpening of edges and vertices according to the given
+    //  boundary interpolation rule in the Options.
+    //  Since both involve traversing the edge and vertex lists and noting
+    //  the presence of boundaries -- best to do both at once...
+    //
+    Vtr::internal::Level&  baseLevel = refiner.getLevel(0);
 
     Sdc::Options options = refiner.GetSchemeOptions();
     Sdc::Crease  creasing(options);
 
-    bool sharpenCornerVerts    = (options.GetVVarBoundaryInterpolation() == Sdc::Options::VVAR_BOUNDARY_EDGE_AND_CORNER);
-    bool sharpenNonManFeatures = (options.GetNonManifoldInterpolation() == Sdc::Options::NON_MANIFOLD_SHARP);
+    bool makeBoundaryFacesHoles =
+        (options.GetVtxBoundaryInterpolation() ==
+            Sdc::Options::VTX_BOUNDARY_NONE) &&
+        (Sdc::SchemeTypeTraits::GetLocalNeighborhoodSize(
+            refiner.GetSchemeType()) > 0);
+
+    bool sharpenCornerVerts =
+        (options.GetVtxBoundaryInterpolation() ==
+            Sdc::Options::VTX_BOUNDARY_EDGE_AND_CORNER);
+
+    bool sharpenNonManFeatures = true;
 
     //
-    //  Process the Edge tags first, as Vertex tags (notably the Rule) are dependent on
-    //  properties of their incident edges.
+    //  Before initializing edge and vertex tags, tag any qualifying boundary
+    //  faces as holes before the sharpness of incident vertices and edges is
+    //  affected by boundary interpolation rules.
+    //
+    //  Faces will be excluded (tagged as holes) if they contain a vertex on a
+    //  boundary that did not have all of its incident boundary edges sharpened
+    //  (not just the boundary edges within the face), so inspect the vertices
+    //  and tag their incident faces when necessary:
+    //
+    if (makeBoundaryFacesHoles) {
+        for (Vtr::Index vIndex = 0; vIndex < baseLevel.getNumVertices();
+                ++vIndex) {
+            Vtr::ConstIndexArray vEdges = baseLevel.getVertexEdges(vIndex);
+            Vtr::ConstIndexArray vFaces = baseLevel.getVertexFaces(vIndex);
+
+            //  Ignore manifold interior vertices:
+            if ((vEdges.size() == vFaces.size()) &&
+                !baseLevel.getVertexTag(vIndex)._nonManifold) {
+                continue;
+            }
+
+            bool excludeFaces = false;
+            for (int i = 0; !excludeFaces && (i < vEdges.size()); ++i) {
+                excludeFaces = (baseLevel.getNumEdgeFaces(vEdges[i]) == 1) &&
+                    !Sdc::Crease::IsInfinite(
+                        baseLevel.getEdgeSharpness(vEdges[i]));
+            }
+            if (excludeFaces) {
+                for (int i = 0; i < vFaces.size(); ++i) {
+                    baseLevel.getFaceTag(vFaces[i])._hole = true;
+                }
+                //  Need to tag Refiner (the Level does not keep track of this)
+                refiner._hasHoles = true;
+            }
+        }
+    }
+
+    //
+    //  Process the Edge tags first, as Vertex tags (notably the Rule) are
+    //  dependent on properties of their incident edges.
     //
     for (Vtr::Index eIndex = 0; eIndex < baseLevel.getNumEdges(); ++eIndex) {
-        Vtr::Level::ETag& eTag       = baseLevel._edgeTags[eIndex];
-        float&          eSharpness = baseLevel._edgeSharpness[eIndex];
+        Vtr::internal::Level::ETag& eTag = baseLevel.getEdgeTag(eIndex);
 
-        eTag._boundary = (baseLevel._edgeFaceCountsAndOffsets[eIndex*2 + 0] < 2);
+        float& eSharpness = baseLevel.getEdgeSharpness(eIndex);
+
+        eTag._boundary = (baseLevel.getNumEdgeFaces(eIndex) < 2);
         if (eTag._boundary || (eTag._nonManifold && sharpenNonManFeatures)) {
             eSharpness = Sdc::Crease::SHARPNESS_INFINITE;
         }
@@ -152,25 +262,34 @@ TopologyRefinerFactoryBase::applyComponentTagsAndBoundarySharpness(TopologyRefin
     }
 
     //
-    //  Process the Vertex tags now -- for some tags (semi-sharp and its rule) we need
-    //  to inspect all incident edges:
+    //  Process the Vertex tags now -- for some tags (semi-sharp and its rule)
+    //  we need to inspect all incident edges:
     //
+    int schemeRegularInteriorValence =
+        Sdc::SchemeTypeTraits::GetRegularVertexValence(refiner.GetSchemeType());
+    int schemeRegularBoundaryValence = schemeRegularInteriorValence / 2;
+
     for (Vtr::Index vIndex = 0; vIndex < baseLevel.getNumVertices(); ++vIndex) {
-        Vtr::Level::VTag& vTag       = baseLevel._vertTags[vIndex];
-        float&          vSharpness = baseLevel._vertSharpness[vIndex];
+        Vtr::internal::Level::VTag& vTag = baseLevel.getVertexTag(vIndex);
 
-        Vtr::IndexArray const vEdges = baseLevel.getVertexEdges(vIndex);
-        Vtr::IndexArray const vFaces = baseLevel.getVertexFaces(vIndex);
+        float& vSharpness = baseLevel.getVertexSharpness(vIndex);
+
+        Vtr::ConstIndexArray vEdges = baseLevel.getVertexEdges(vIndex);
+        Vtr::ConstIndexArray vFaces = baseLevel.getVertexFaces(vIndex);
 
         //
-        //  Take inventory of properties of incident edges that affect this vertex:
+        //  Take inventory of properties of incident edges that affect this
+        //  vertex:
         //
+        int boundaryEdgeCount    = 0;
         int infSharpEdgeCount    = 0;
         int semiSharpEdgeCount   = 0;
         int nonManifoldEdgeCount = 0;
         for (int i = 0; i < vEdges.size(); ++i) {
-            Vtr::Level::ETag const& eTag = baseLevel._edgeTags[vEdges[i]];
+            Vtr::internal::Level::ETag const& eTag =
+                baseLevel.getEdgeTag(vEdges[i]);
 
+            boundaryEdgeCount    += eTag._boundary;
             infSharpEdgeCount    += eTag._infSharp;
             semiSharpEdgeCount   += eTag._semiSharp;
             nonManifoldEdgeCount += eTag._nonManifold;
@@ -181,151 +300,142 @@ TopologyRefinerFactoryBase::applyComponentTagsAndBoundarySharpness(TopologyRefin
         //  Sharpen the vertex before using it in conjunction with incident edge
         //  properties to determine the semi-sharp tag and rule:
         //
-        bool isCorner = (vFaces.size() == 1) && (vEdges.size() == 2);
-        if (isCorner && sharpenCornerVerts) {
+        bool isTopologicalCorner = (vFaces.size() == 1) && (vEdges.size() == 2);
+        bool isSharpenedCorner =  isTopologicalCorner && sharpenCornerVerts;
+        if (isSharpenedCorner) {
             vSharpness = Sdc::Crease::SHARPNESS_INFINITE;
         } else if (vTag._nonManifold && sharpenNonManFeatures) {
-            //  Don't sharpen the vertex if a non-manifold crease:
-            if (nonManifoldEdgeCount != 2) {
+            //
+            //  We avoid sharpening non-manifold vertices when they occur on
+            //  interior non-manifold creases, i.e. a pair of opposing non-
+            //  manifold edges with more than two incident faces.  In these
+            //  cases there are more incident faces than edges (1 more for
+            //  each additional "fin") and no boundaries.
+            //
+            if (! ((nonManifoldEdgeCount == 2) && (boundaryEdgeCount == 0) &&
+                   (vFaces.size() > vEdges.size()))) {
                 vSharpness = Sdc::Crease::SHARPNESS_INFINITE;
             }
         }
 
-        vTag._infSharp = Sdc::Crease::IsInfinite(vSharpness);
+        vTag._infSharp       = Sdc::Crease::IsInfinite(vSharpness);
+        vTag._semiSharp      = Sdc::Crease::IsSemiSharp(vSharpness);
+        vTag._semiSharpEdges = (semiSharpEdgeCount > 0);
 
-        vTag._semiSharp = Sdc::Crease::IsSemiSharp(vSharpness) || (semiSharpEdgeCount > 0);
-
-        vTag._rule = (Vtr::Level::VTag::VTagSize)creasing.DetermineVertexVertexRule(vSharpness, sharpEdgeCount);
+        vTag._rule = (Vtr::internal::Level::VTag::VTagSize)
+            creasing.DetermineVertexVertexRule(vSharpness, sharpEdgeCount);
 
         //
-        //  Assign topological tags -- note that the "xordinary" (or conversely a "regular")
-        //  tag is still being considered, but regardless, it depends on the Sdc::Scheme...
+        //  Assign topological tags -- note that the "xordinary" tag is not
+        //  assigned if non-manifold:
         //
-        assert(refiner.GetSchemeType() == Sdc::TYPE_CATMARK);
-
-        vTag._boundary = (vFaces.size() < vEdges.size());
-        if (isCorner) {
-            vTag._xordinary = !sharpenCornerVerts;
+        vTag._boundary = (boundaryEdgeCount > 0);
+        vTag._corner = isTopologicalCorner && vTag._infSharp;
+        if (vTag._nonManifold) {
+            vTag._xordinary = false;
+        } else if (vTag._corner) {
+            vTag._xordinary = false;
         } else if (vTag._boundary) {
-            vTag._xordinary = (vFaces.size() != 2);
+            vTag._xordinary = (vFaces.size() != schemeRegularBoundaryValence);
         } else {
-            vTag._xordinary = (vFaces.size() != 4);
+            vTag._xordinary = (vFaces.size() != schemeRegularInteriorValence);
         }
-    }
+        vTag._incomplete = 0;
 
-    //
-    //  Anything more to be done with Face tags? (eventually when processing edits perhaps)
-    //
-    //  for (Vtr::Index fIndex = 0; fIndex < baseLevel.getNumFaces(); ++fIndex) {
-    //  }
-}
+        //
+        //  Assign tags specific to inf-sharp features to identify regular
+        //  topologies partitioned by inf-sharp creases -- must be no semi-
+        //  harp features here (and manifold for now):
+        //
+        vTag._infSharpEdges   = (infSharpEdgeCount > 0);
+        vTag._infSharpCrease  = false;
+        vTag._infIrregular    = vTag._infSharp || vTag._infSharpEdges;
 
-//
-// Specialization for raw topology data
-//
-template <>
-void
-TopologyRefinerFactory<TopologyRefinerFactoryBase::TopologyDescriptor>::resizeComponentTopology(
-    TopologyRefiner & refiner, TopologyDescriptor const & desc) {
+        if (vTag._infSharpEdges) {
+            //  Ignore semi-sharp vertex sharpness when computing the
+            //  inf-sharp Rule:
+            Sdc::Crease::Rule infRule = creasing.DetermineVertexVertexRule(
+                (vTag._infSharp ? vSharpness : 0.0f), infSharpEdgeCount);
 
-    refiner.setNumBaseVertices(desc.numVertices);
-    refiner.setNumBaseFaces(desc.numFaces);
+            if (infRule == Sdc::Crease::RULE_CREASE) {
+                vTag._infSharpCrease = true;
 
-    for (int face=0; face<desc.numFaces; ++face) {
+                //  A "regular" inf-crease can only occur along a manifold
+                //  regular boundary or by bisecting a manifold interior
+                //  region (it is also possible along non-manifold vertices
+                //  in some cases, but that requires much more effort to
+                //  detect -- perhaps later...)
+                //
+                if (!vTag._xordinary && !vTag._nonManifold) {
+                    if (vTag._boundary) {
+                        vTag._infIrregular = false;
+                    } else {
+                        assert((schemeRegularInteriorValence == 4) ||
+                            (schemeRegularInteriorValence == 6));
 
-        refiner.setNumBaseFaceVertices(face, desc.vertsPerFace[face]);
-    }
-}
-
-template <>
-void
-TopologyRefinerFactory<TopologyRefinerFactoryBase::TopologyDescriptor>::assignComponentTopology(
-    TopologyRefiner & refiner, TopologyDescriptor const & desc) {
-
-    for (int face=0, idx=0; face<desc.numFaces; ++face) {
-
-        IndexArray dstFaceVerts = refiner.setBaseFaceVertices(face);
-
-        for (int vert=0; vert<dstFaceVerts.size(); ++vert) {
-
-            dstFaceVerts[vert] = desc.vertIndices[idx++];
+                        if (schemeRegularInteriorValence == 4) {
+                            vTag._infIrregular =
+                                (baseLevel.getEdgeTag(vEdges[0])._infSharp !=
+                                 baseLevel.getEdgeTag(vEdges[2])._infSharp);
+                        } else if (schemeRegularInteriorValence == 6) {
+                            vTag._infIrregular =
+                                (baseLevel.getEdgeTag(vEdges[0])._infSharp !=
+                                 baseLevel.getEdgeTag(vEdges[3])._infSharp) ||
+                                (baseLevel.getEdgeTag(vEdges[1])._infSharp !=
+                                 baseLevel.getEdgeTag(vEdges[4])._infSharp);
+                        }
+                    }
+                }
+            } else if (infRule == Sdc::Crease::RULE_CORNER) {
+                //  A regular set of inf-corners occurs when all edges are
+                //  sharp and not a smooth corner:
+                //
+                if ((infSharpEdgeCount == vEdges.size() &&
+                    ((vEdges.size() > 2) || vTag._infSharp))) {
+                    vTag._infIrregular = false;
+                }
+            }
         }
-    }
-}
 
-template <>
-void
-TopologyRefinerFactory<TopologyRefinerFactoryBase::TopologyDescriptor>::assignFaceVaryingTopology(
-    TopologyRefiner & refiner, TopologyDescriptor const & desc) {
-
-    if (desc.numFVarChannels>0) {
-
-        for (int channel=0; channel<desc.numFVarChannels; ++channel) {
-
-            int        channelSize    = desc.fvarChannels[channel].numValues;
-            int const* channelIndices = desc.fvarChannels[channel].valueIndices;
-
-#if defined(DEBUG) or defined(_DEBUG)
-            int channelIndex = refiner.createFVarChannel(channelSize);
-            assert(channelIndex == channel);
-#else
-            refiner.createFVarChannel(channelSize);
-#endif
-            for (int face=0, idx=0; face<desc.numFaces; ++face) {
-
-                IndexArray dstFaceValues = refiner.getBaseFVarFaceValues(face, channel);
-
-                for (int vert=0; vert<dstFaceValues.size(); ++vert) {
-
-                    dstFaceValues[vert] = channelIndices[idx++];
+        //
+        //  If any irregular faces are present, mark whether or not a vertex
+        //  is incident any irregular face:
+        //
+        if (refiner._hasIrregFaces) {
+            int regSize = refiner._regFaceSize;
+            for (int i = 0; i < vFaces.size(); ++i) {
+                if (baseLevel.getFaceVertices(vFaces[i]).size() != regSize) {
+                    vTag._incidIrregFace = true;
+                    break;
                 }
             }
         }
     }
+    return true;
 }
 
-template <>
-void
-TopologyRefinerFactory<TopologyRefinerFactoryBase::TopologyDescriptor>::assignComponentTags(
-    TopologyRefiner & refiner, TopologyDescriptor const & desc) {
+bool
+TopologyRefinerFactoryBase::prepareFaceVaryingChannels(
+    TopologyRefiner& refiner) {
 
+    Vtr::internal::Level& baseLevel = refiner.getLevel(0);
 
-    if ((desc.numCreases>0) and desc.creaseVertexIndexPairs and desc.creaseWeights) {
+    int regVertexValence   =
+        Sdc::SchemeTypeTraits::GetRegularVertexValence(refiner.GetSchemeType());
+    int regBoundaryValence = regVertexValence / 2;
 
-        int const * vertIndexPairs = desc.creaseVertexIndexPairs;
-        for (int edge=0; edge<desc.numCreases; ++edge, vertIndexPairs+=2) {
-
-            Index idx = refiner.FindEdge(0, vertIndexPairs[0], vertIndexPairs[1]);
-
-            if (idx!=Vtr::INDEX_INVALID) {
-                refiner.baseEdgeSharpness(idx) = desc.creaseWeights[edge];
-            } else {
-                // XXXX report error !
-            }
+    for (int channel=0; channel<refiner.GetNumFVarChannels(); ++channel) {
+        if (baseLevel.getNumFVarValues(channel) == 0) {
+            char msg[1024];
+            snprintf(msg, 1024,
+                "Failure in TopologyRefinerFactory<>::Create() -- "
+                "face-varying channel %d has no values.", channel);
+            Error(FAR_RUNTIME_ERROR, msg);
+            return false;
         }
+        baseLevel.completeFVarChannelTopology(channel, regBoundaryValence);
     }
-
-    if ((desc.numCorners>0) and desc.cornerVertexIndices and desc.cornerWeights) {
-
-        for (int vert=0; vert<desc.numCorners; ++vert) {
-
-            int idx = desc.cornerVertexIndices[vert];
-
-            if (idx < refiner.GetNumVertices(0)) {
-                refiner.baseVertexSharpness(idx) = desc.cornerWeights[vert];
-            } else {
-                // XXXX report error !
-            }
-        }
-    }
-
-}
-
-TopologyRefinerFactoryBase::TopologyDescriptor::TopologyDescriptor() :
-    numVertices(0), numFaces(0), vertsPerFace(0), vertIndices(0),
-        numCreases(0), creaseVertexIndexPairs(0), creaseWeights(0),
-            numCorners(0), cornerVertexIndices(0), cornerWeights(0),
-                numFVarChannels(0), fvarChannels(0) {
+    return true;
 }
 
 } // end namespace Far

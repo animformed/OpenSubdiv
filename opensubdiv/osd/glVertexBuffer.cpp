@@ -22,9 +22,9 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#include "../osd/glVertexBuffer.h"
+#include "glLoader.h"
 
-#include "../osd/opengl.h"
+#include "../osd/glVertexBuffer.h"
 
 namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
@@ -34,8 +34,10 @@ namespace Osd {
 GLVertexBuffer::GLVertexBuffer(int numElements, int numVertices)
     : _numElements(numElements),
       _numVertices(numVertices),
-      _vbo(0)
-{
+      _vbo(0) {
+
+    // Initialize internal OpenGL loader library if necessary
+    OpenSubdiv::internal::GLLoader::libraryInitializeGL();
 }
 
 GLVertexBuffer::~GLVertexBuffer() {
@@ -44,7 +46,7 @@ GLVertexBuffer::~GLVertexBuffer() {
 }
 
 GLVertexBuffer *
-GLVertexBuffer::Create(int numElements, int numVertices) {
+GLVertexBuffer::Create(int numElements, int numVertices, void *) {
 
     GLVertexBuffer *instance =
         new GLVertexBuffer(numElements, numVertices);
@@ -54,18 +56,21 @@ GLVertexBuffer::Create(int numElements, int numVertices) {
 }
 
 void
-GLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices) {
+GLVertexBuffer::UpdateData(const float *src, int startVertex, int numVertices,
+                           void * /*deviceContext*/) {
 
     int size = numVertices * _numElements * sizeof(float);
-#if defined(GL_EXT_direct_state_access)
-    if (glNamedBufferSubDataEXT) {
-        glNamedBufferSubDataEXT(_vbo, startVertex * _numElements * sizeof(float), size, src);
-    } else {
-#else
-    {
+#if defined(GL_ARB_direct_state_access)
+    if (OSD_OPENGL_HAS(ARB_direct_state_access)) {
+        glNamedBufferSubData(_vbo,
+                             startVertex * _numElements * sizeof(float),
+size, src);
+    } else
 #endif
+    {
         glBindBuffer(GL_ARRAY_BUFFER, _vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, startVertex * _numElements * sizeof(float), size, src);
+        glBufferSubData(GL_ARRAY_BUFFER,
+                        startVertex * _numElements * sizeof(float), size, src);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 }
@@ -83,7 +88,7 @@ GLVertexBuffer::GetNumVertices() const {
 }
 
 GLuint
-GLVertexBuffer::BindVBO() {
+GLVertexBuffer::BindVBO(void * /*deviceContext*/) {
 
     return _vbo;
 }
@@ -93,17 +98,17 @@ GLVertexBuffer::allocate() {
 
     int size = _numElements * _numVertices * sizeof(float);
 
-    glGenBuffers(1, &_vbo);
 
-#if defined(GL_EXT_direct_state_access)
-    if (glNamedBufferDataEXT) {
+#if defined(GL_ARB_direct_state_access)
+    if (OSD_OPENGL_HAS(ARB_direct_state_access)) {
+        glCreateBuffers(1, &_vbo);
         glNamedBufferDataEXT(_vbo, size, 0, GL_DYNAMIC_DRAW);
-    } else {
-#else
-    {
+    } else
 #endif
+    {
         GLint prev = 0;
         glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev);
+        glGenBuffers(1, &_vbo);
         glBindBuffer(GL_ARRAY_BUFFER, _vbo);
         glBufferData(GL_ARRAY_BUFFER, size, 0, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, prev);

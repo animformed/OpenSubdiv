@@ -22,13 +22,11 @@
 #   language governing permissions and limitations under the Apache License.
 #
 
-include_directories("${PROJECT_SOURCE_DIR}/opensubdiv")
-
 set(SOURCE_FILES
     osd_tutorial_0.cpp
 )
 
-add_executable(osd_tutorial_0
+osd_add_executable(osd_tutorial_0 "tutorials/osd"
     ${SOURCE_FILES}
 )
 
